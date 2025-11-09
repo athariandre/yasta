@@ -210,7 +210,10 @@ class RolloutCollector:
                 next_non_terminal = 1.0 - final_done
             else:
                 next_value = values[t + 1]
-                next_non_terminal = 1.0 - dones[t + 1]  # Fixed: use dones[t+1], not dones[t]
+                # Use dones[t] to check if current step ended episode
+                # When done=True, env.reset() is called, so next obs is from new episode
+                # We should not bootstrap across episode boundaries
+                next_non_terminal = 1.0 - dones[t]
             
             # TD error: delta_t = r_t + gamma * V_{t+1} * (1 - done_{t+1}) - V_t
             delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]

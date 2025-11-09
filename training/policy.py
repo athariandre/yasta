@@ -188,9 +188,9 @@ class ActorCriticPolicy(nn.Module):
             obs: Observation dictionary
         
         Returns:
-            Encoded observation tensor (detached from computation graph)
+            Encoded observation tensor (detached from computation graph, on device)
         """
-        return self._obs_to_tensor(obs).detach()
+        return self._obs_to_tensor(obs).to(self.device).detach()
     
     def _obs_batch_to_tensor(self, obs_list: List[Dict[str, np.ndarray]]) -> torch.Tensor:
         """
@@ -388,7 +388,8 @@ class ActorCriticPolicy(nn.Module):
             # KL divergence: KL = old_log_prob - new_log_prob
             # Clamp to avoid NaN from unstable samples
             kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
-            kl_div = kl.mean()
+            # Use absolute value for stability
+            kl_div = kl.mean().abs()
         else:
             kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         
