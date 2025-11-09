@@ -12,19 +12,29 @@ class TrainingConfig:
     # Random seed for reproducibility
     SEED = 42
     
+    # Network architecture
+    LATENT_SIZE = 128  # size of latent feature vector
+    DEVICE = "cpu"  # device for training (CPU-only per competition rules)
+    
     # PPO hyperparameters
     LEARNING_RATE = 3e-4
     GAMMA = 0.99  # discount factor
     GAE_LAMBDA = 0.95  # GAE lambda for advantage estimation
-    CLIP_EPSILON = 0.2  # PPO clipping parameter
-    VALUE_COEF = 0.5  # value loss coefficient
-    ENTROPY_COEF = 0.01  # entropy bonus coefficient
+    PPO_CLIP_EPS = 0.2  # PPO clipping parameter (renamed for clarity)
+    CLIP_EPSILON = 0.2  # PPO clipping parameter (kept for backward compatibility)
+    VALUE_COEFF = 0.5  # value loss coefficient (renamed for consistency)
+    VALUE_COEF = 0.5  # value loss coefficient (kept for backward compatibility)
+    ENTROPY_COEFF = 0.01  # entropy bonus coefficient (renamed for consistency)
+    ENTROPY_COEF = 0.01  # entropy bonus coefficient (kept for backward compatibility)
     MAX_GRAD_NORM = 0.5  # gradient clipping
+    
+    # Observation normalization
+    OBS_NORMALIZATION_EPS = 1e-8  # epsilon for numerical stability
     
     # Rollout settings
     ROLLOUT_LENGTH = 2048  # number of steps to collect per rollout
-    BATCH_SIZE = 64  # minibatch size for PPO updates
-    NUM_EPOCHS = 10  # number of optimization epochs per rollout
+    BATCH_SIZE = 512  # minibatch size for PPO updates
+    NUM_EPOCHS = 4  # number of optimization epochs per rollout
     
     # Training settings
     MAX_TRAINING_STEPS = 1_000_000  # maximum environment steps

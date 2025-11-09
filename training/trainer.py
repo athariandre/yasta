@@ -14,6 +14,7 @@ import random
 import time
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 
 import sys
@@ -21,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.config import config
 from training.env import TronEnv
-from training.rollout import RolloutCollector, DummyPolicy
+from training.rollout import RolloutCollector
+from training.policy import ActorCriticPolicy
 from case_closed_game import GameResult
 
 
@@ -63,8 +65,20 @@ class Trainer:
         # Set seeds for reproducibility
         set_seed(self.config.SEED)
         
-        # Initialize policy (DummyPolicy for PR-2, will be NN in PR-3)
-        self.policy = DummyPolicy(action_space=self.config.NUM_ACTIONS)
+        # Initialize policy (Neural network for PR-3)
+        self.policy = ActorCriticPolicy(
+            board_h=self.config.BOARD_H,
+            board_w=self.config.BOARD_W,
+            num_actions=self.config.NUM_ACTIONS,
+            latent_size=self.config.LATENT_SIZE,
+            device=self.config.DEVICE
+        )
+        
+        # Initialize optimizer
+        self.optimizer = torch.optim.Adam(
+            self.policy.parameters(),
+            lr=self.config.LEARNING_RATE
+        )
         
         # Initialize environment
         self.env = TronEnv(
@@ -160,30 +174,88 @@ class Trainer:
     
     def _ppo_update(self, rollout_data):
         """
-        Perform PPO update (placeholder for PR-2).
+        Perform PPO update.
         
-        In PR-3, this will:
+        Implements the full PPO algorithm:
         1. Split data into mini-batches
-        2. Compute policy and value losses
-        3. Backpropagate and update network
-        4. Clip gradients
+        2. For each epoch:
+           - Shuffle data
+           - Compute policy and value losses
+           - Backpropagate and update network
+           - Clip gradients
         
         Args:
             rollout_data: Dictionary with rollout data and advantages
         """
-        # Placeholder: In PR-3, this will contain actual PPO update logic
+        # Tracking metrics
+        policy_losses = []
+        value_losses = []
+        entropies = []
+        clip_fractions = []
         
-        # For now, just iterate through mini-batches to validate structure
+        # Get old log probabilities for importance sampling
+        old_logprobs = rollout_data['logprobs']
+        
+        # PPO update loop
         for epoch in range(self.config.NUM_EPOCHS):
+            # Iterate through mini-batches
             for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE):
-                # In PR-3: compute losses and update network
-                # For now: just validate batch structure
-                assert 'observations' in batch
-                assert 'actions' in batch
-                assert 'advantages' in batch
-                assert 'returns' in batch
-                # Last batch may be smaller than BATCH_SIZE
-                assert len(batch['actions']) > 0
+                # Get batch data
+                observations = batch['observations']
+                actions = batch['actions']
+                old_logprobs_batch = batch['logprobs']
+                advantages = batch['advantages']
+                returns = batch['returns']
+                
+                # Evaluate actions with current policy
+                logprobs, values, entropy = self.policy.evaluate_actions(observations, actions)
+                
+                # Compute ratio for PPO clip
+                ratio = torch.exp(logprobs - old_logprobs_batch)
+                
+                # Compute policy loss (PPO clip objective)
+                surr1 = ratio * advantages
+                surr2 = torch.clamp(ratio, 1.0 - self.config.PPO_CLIP_EPS, 1.0 + self.config.PPO_CLIP_EPS) * advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # Compute value loss (MSE)
+                value_loss = F.mse_loss(values, returns)
+                
+                # Compute entropy bonus
+                entropy_loss = -entropy.mean()
+                
+                # Combine losses
+                total_loss = (
+                    policy_loss +
+                    self.config.VALUE_COEFF * value_loss +
+                    self.config.ENTROPY_COEFF * entropy_loss
+                )
+                
+                # Backpropagation
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.MAX_GRAD_NORM)
+                
+                # Optimizer step
+                self.optimizer.step()
+                
+                # Track metrics
+                policy_losses.append(policy_loss.item())
+                value_losses.append(value_loss.item())
+                entropies.append(entropy.mean().item())
+                
+                # Track clip fraction
+                with torch.no_grad():
+                    clip_fraction = ((ratio - 1.0).abs() > self.config.PPO_CLIP_EPS).float().mean().item()
+                    clip_fractions.append(clip_fraction)
+        
+        # Print update metrics
+        print(f"[Update {self.num_updates + 1}] Policy loss: {np.mean(policy_losses):.4f}")
+        print(f"              Value loss: {np.mean(value_losses):.4f}")
+        print(f"              Entropy: {np.mean(entropies):.4f}")
+        print(f"              Clip frac: {np.mean(clip_fractions):.4f}")
     
     def _update_episode_stats(self, episode_info):
         """
@@ -262,8 +334,10 @@ class Trainer:
                 'SEED': self.config.SEED,
                 'LEARNING_RATE': self.config.LEARNING_RATE,
                 'GAMMA': self.config.GAMMA,
-            }
-            # In PR-3: add model weights
+            },
+            # PR-3: Add model and optimizer state
+            'model_state_dict': self.policy.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
         }
         
         torch.save(checkpoint, checkpoint_path)
@@ -276,7 +350,7 @@ class Trainer:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.config.DEVICE)
         
         self.total_steps = checkpoint['total_steps']
         self.num_updates = checkpoint['num_updates']
@@ -285,7 +359,11 @@ class Trainer:
         self.win_counts = checkpoint['win_counts']
         self.total_episodes = checkpoint['total_episodes']
         
-        # In PR-3: load model weights
+        # PR-3: Load model and optimizer state
+        if 'model_state_dict' in checkpoint:
+            self.policy.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         print(f"[Checkpoint] Loaded from {checkpoint_path}")
         print(f"  Resuming from step {self.total_steps}")
@@ -294,7 +372,7 @@ class Trainer:
 def main():
     """Main entry point for training."""
     print("\n" + "="*60)
-    print("Tron Agent Training - PR-2")
+    print("Tron Agent Training - PR-3 (Neural Policy)")
     print("="*60)
     print(f"Config:")
     print(f"  Seed: {config.SEED}")
@@ -302,6 +380,7 @@ def main():
     print(f"  Rollout length: {config.ROLLOUT_LENGTH}")
     print(f"  Batch size: {config.BATCH_SIZE}")
     print(f"  Max steps: {config.MAX_TRAINING_STEPS}")
+    print(f"  Device: {config.DEVICE}")
     print("="*60 + "\n")
     
     # Initialize trainer
