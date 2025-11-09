@@ -102,3 +102,8 @@ Temporary Items
 
 # Jetbrains / PyCharm
 .idea/
+
+# --- Test and benchmark scripts ---
+run_benchmark.py
+measure_performance.py
+test_determinism.py
