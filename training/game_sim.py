@@ -48,8 +48,10 @@ class LocalGame:
             Initial observation for player 1
         """
         # Note: Global RNG seeding is handled by Trainer.set_seed()
+        # The official Game class does not support custom seeds in its constructor,
+        # so determinism at the engine level relies on global Python random state.
         # We rely on the trainer's seed policy for deterministic behavior
-        # rather than re-seeding here to avoid conflicts with other modules
+        # rather than re-seeding here to avoid conflicts with other modules.
         
         # Create new game instance
         self.game = Game()
