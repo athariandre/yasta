@@ -328,8 +328,8 @@ class RolloutCollector:
             # Encode observations using policy
             obs_list = [rollout_data['obs'][i] for i in batch_indices]
             if policy is not None:
-                # Use policy.encode_obs() to encode observations
-                obs_tensors = torch.stack([policy.encode_obs(obs) for obs in obs_list], dim=0)
+                # Use policy.encode_obs() to encode observations and ensure device consistency
+                obs_tensors = torch.stack([policy.encode_obs(obs) for obs in obs_list], dim=0).to(policy.device)
             else:
                 # Fallback: just use empty tensors (should not happen)
                 obs_tensors = torch.zeros((len(batch_indices), 1))
