@@ -411,6 +411,10 @@ class Trainer:
         print(f"  Approx KL: {update_metrics['approx_kl']:.4f}")
         print(f"  Rollout time: {rollout_time:.2f}s")
         print(f"  Update time: {update_time:.2f}s")
+        if self.rollout_collector.illegal_mask_fallbacks > 0:
+            print(f"  Illegal mask fallbacks: {self.rollout_collector.illegal_mask_fallbacks}")
+        if self.skipped_updates_nonfinite > 0:
+            print(f"  Skipped updates (non-finite): {self.skipped_updates_nonfinite}")
         
         # Log to CSV
         if self.csv_logger is not None:

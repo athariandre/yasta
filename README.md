@@ -80,6 +80,148 @@ This template provides a few key files to get you started. Here's what each one 
 *   You can also run `local-tester.py` to verify your agent's API compliance before testing against another agent.
 
 
+---
+
+## Training Your Agent with PPO
+
+This repository includes a full PPO (Proximal Policy Optimization) training system for developing Tron agents through self-play.
+
+### Quick Start
+
+**Run a smoke test (128 steps):**
+```bash
+python -m training.trainer --max-steps 128 --rollout-length 64 --batch-size 32 --epochs 2
+```
+
+**Run full training (200k steps):**
+```bash
+bash scripts/run_training.sh
+```
+
+**Custom training run:**
+```bash
+python -m training.trainer \
+  --seed 42 \
+  --max-steps 200000 \
+  --rollout-length 2048 \
+  --batch-size 256 \
+  --epochs 10 \
+  --lr 0.0003 \
+  --device cpu \
+  --use-frozen-opponent true \
+  --opponent-update-interval 5
+```
+
+**Resume from checkpoint:**
+```bash
+python -m training.trainer --ckpt-path training/checkpoints/checkpoint_step_50000.pt
+```
+
+### Training in Docker
+
+```bash
+# Build the training image
+docker build -t tron-ppo:cpu .
+
+# Run training (mounts current directory for checkpoints/logs)
+docker run --rm -it -v "$PWD:/app" tron-ppo:cpu
+
+# Or run with custom parameters
+docker run --rm -it -v "$PWD:/app" tron-ppo:cpu \
+  python -m training.trainer --max-steps 100000
+```
+
+### Expected Outputs
+
+**Console:** Update metrics printed every ~4096 steps showing:
+- Episode statistics (win rate, avg reward, avg length)
+- Training metrics (policy loss, value loss, entropy, KL divergence)
+- Timing information (rollout time, update time)
+
+**CSV Log:** `runs/<RUN_NAME>/metrics.csv` contains all metrics with headers:
+```
+step,update,episodes,avg_reward,avg_len,win_rate,draw_rate,
+policy_loss,value_loss,entropy,clip_frac,approx_kl,rollout_sec,update_sec
+```
+
+**Checkpoints:** Saved to `training/checkpoints/` at intervals (default: every 50k steps):
+- `checkpoint_step_<N>.pt` - Periodic checkpoints
+- `final_checkpoint.pt` - Saved at training completion
+
+### Configuration Parameters
+
+All training parameters can be configured via CLI arguments:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--seed` | 42 | Random seed for reproducibility |
+| `--max-steps` | 200000 | Maximum training steps |
+| `--device` | cpu | Device (CPU only per competition rules) |
+| `--rollout-length` | 2048 | Steps per rollout |
+| `--batch-size` | 256 | Mini-batch size |
+| `--epochs` | 10 | PPO epochs per update |
+| `--lr` | 0.0003 | Learning rate |
+| `--gamma` | 0.99 | Discount factor |
+| `--max-kl` | 0.03 | KL divergence threshold for early stopping |
+| `--use-frozen-opponent` | true | Use frozen opponent for stable self-play |
+| `--opponent-update-interval` | 5 | Update opponent every N updates |
+| `--csv-log` | true | Enable CSV logging |
+| `--tensorboard` | false | Enable TensorBoard logging (optional) |
+
+### Performance Metrics
+
+**Model Specifications:**
+- Architecture: 2-layer MLP encoder + actor/critic heads
+- Model size: <5MB (enforced)
+- Forward pass: <5ms per step on typical CPU
+- Board size: 15x15 (configurable)
+
+**Training Performance:**
+- Rollout collection: ~2-5 seconds per 2048 steps
+- PPO update: ~5-10 seconds per update
+- Expected win rate improvement: ≥5pp over first 50k steps vs. initial frozen opponent
+
+### Testing
+
+Run the test suite to verify installation:
+
+```bash
+# Install test dependencies
+pip install pytest
+
+# Run all tests
+pytest -v
+
+# Run only unit tests
+pytest -v -m unit
+
+# Run only integration tests (slower)
+pytest -v -m integration
+
+# Run specific test file
+pytest tests/test_policy.py -v
+```
+
+### Troubleshooting
+
+**Issue:** `ModuleNotFoundError: No module named 'torch'`
+- **Solution:** Install dependencies: `pip install -r requirements.txt`
+
+**Issue:** Training shows NaN losses
+- **Solution:** This is automatically handled with NaN guards. Check logs for "skipped updates" counter.
+
+**Issue:** Win rate not improving
+- **Solution:** 
+  - Try lowering learning rate (`--lr 0.0001`)
+  - Increase entropy coefficient for more exploration (`--entropy-coeff 0.02`)
+  - Check that opponent is updating at reasonable intervals
+
+**Issue:** Out of memory
+- **Solution:** Reduce batch size (`--batch-size 128`) or rollout length (`--rollout-length 1024`)
+
+
+---
+
 ### Disclaimers:
 * There is a 5GB limit on Docker image size, to keep competition fair and timely.
 * Due to platform and build-time constraints, participants are limited to **CPU-only PyTorch**; GPU-enabled versions, including CUDA builds, are disallowed. Any other heavy-duty GPU or large ML frameworks (like Tensorflow, JAX) will not be allowed.

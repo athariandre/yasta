@@ -38,6 +38,9 @@ class RolloutCollector:
         self.rollout_length = rollout_length if rollout_length else config.ROLLOUT_LENGTH
         self.num_envs = num_envs
         
+        # Counters
+        self.illegal_mask_fallbacks = 0
+        
         # Preallocate storage for efficiency
         self.reset_storage()
     
@@ -93,6 +96,11 @@ class RolloutCollector:
         for step in range(num_steps):
             # Compute action mask using policy's mask function
             action_mask = policy._compute_legal_actions_mask(obs)
+            
+            # Check if mask is all zeros (safety fallback already in policy, but count here)
+            if action_mask.sum() == 0:
+                self.illegal_mask_fallbacks += 1
+                # Policy will handle this, but we log it
             
             # Get action from policy with action mask
             action, logprob, value = policy.act(obs, action_mask)
@@ -252,10 +260,16 @@ class RolloutCollector:
         Returns:
             Processed rollout_data ready for training (all numpy arrays converted to tensors)
         """
-        # Convert observations to tensors - need to encode obs list
-        # Use policy's encode_obs if available, otherwise use _obs_to_tensor
-        # For now, we'll need policy access - this will be handled by trainer
-        # For prepare_batch_data, we'll store as-is and convert in get_mini_batches
+        # Safety assertions for shapes
+        num_steps = len(rollout_data['actions'])
+        assert len(rollout_data['logprobs']) == num_steps, "Logprobs length mismatch"
+        assert len(rollout_data['values']) == num_steps, "Values length mismatch"
+        assert len(rollout_data['rewards']) == num_steps, "Rewards length mismatch"
+        assert len(rollout_data['dones']) == num_steps, "Dones length mismatch"
+        assert len(rollout_data['advantages']) == num_steps, "Advantages length mismatch"
+        assert len(rollout_data['returns']) == num_steps, "Returns length mismatch"
+        assert rollout_data['action_masks'].shape == (num_steps, config.NUM_ACTIONS), \
+            f"Action masks shape mismatch: {rollout_data['action_masks'].shape} vs ({num_steps}, {config.NUM_ACTIONS})"
         
         # Convert numpy arrays to torch tensors
         advantages = torch.from_numpy(rollout_data['advantages']).float()
