@@ -64,6 +64,14 @@ class TrainingConfig:
     # Performance settings
     VORONOI_CAP = 150  # max cells to explore per player in Voronoi BFS
     FLOOD_FILL_CAP = 200  # max cells to explore in flood fill (mobility)
+    
+    # PPO stability settings (PR-3 fixes)
+    KL_TARGET = 0.01  # target KL divergence for early stopping
+    MAX_KL = 0.05  # maximum KL divergence before stopping epoch
+    VALUE_CLIP_RANGE = 0.2  # clipping range for value function (PPO2)
+    OPPONENT_UPDATE_INTERVAL = 10  # update opponent snapshot every N rollouts
+    USE_FROZEN_OPPONENT = True  # freeze opponent policy for stable self-play
+    MAX_BOOST = 3  # maximum boosts per agent
 
 # Create default config instance
 config = TrainingConfig()

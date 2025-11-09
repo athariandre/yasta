@@ -39,7 +39,8 @@ class ActorCriticPolicy(nn.Module):
                  board_w: int = None,
                  num_actions: int = None,
                  latent_size: int = None,
-                 device: str = None):
+                 device: str = None,
+                 verbose: bool = False):
         """
         Initialize Actor-Critic policy.
         
@@ -49,6 +50,7 @@ class ActorCriticPolicy(nn.Module):
             num_actions: Number of discrete actions (uses config if None)
             latent_size: Size of latent feature vector (uses config if None)
             device: Device to use (uses config if None, should be 'cpu')
+            verbose: Whether to print model info (default: False)
         """
         super().__init__()
         
@@ -57,6 +59,7 @@ class ActorCriticPolicy(nn.Module):
         self.num_actions = num_actions if num_actions is not None else config.NUM_ACTIONS
         self.latent_size = latent_size if latent_size is not None else config.LATENT_SIZE
         self.device = torch.device(device if device is not None else config.DEVICE)
+        self.verbose = verbose
         
         # Calculate input sizes
         self.board_size = self.board_h * self.board_w
@@ -92,7 +95,8 @@ class ActorCriticPolicy(nn.Module):
         self.to(self.device)
         
         # Print model size
-        self._print_model_info()
+        if verbose:
+            self._print_model_info()
     
     def _print_model_info(self):
         """Print model architecture and size information."""
@@ -111,36 +115,67 @@ class ActorCriticPolicy(nn.Module):
         if model_size_mb > 5.0:
             print(f"  WARNING: Model size exceeds 5MB limit!")
     
-    def _obs_to_tensor(self, obs: Dict[str, np.ndarray]) -> torch.Tensor:
+    def _obs_to_tensor(self, obs: Dict[str, np.ndarray], normalize: bool = True) -> torch.Tensor:
         """
-        Convert observation dictionary to input tensor.
+        Convert observation dictionary to input tensor with normalization.
         
         Args:
             obs: Observation dictionary with keys:
-                - board: (H, W) float32
-                - my_head: (2,) float32
-                - opp_head: (2,) float32
-                - boosts: (2,) float32
-                - turns: (1,) float32
-                - directions: (2,) float32
-                - alive: (2,) float32
+                - board: (H, W) float32 (values in {0, 1, 2})
+                - my_head: (2,) float32 (x, y coordinates)
+                - opp_head: (2,) float32 (x, y coordinates)
+                - boosts: (2,) float32 (remaining boosts)
+                - turns: (1,) float32 (current turn)
+                - directions: (2,) float32 (encoded 0-3)
+                - alive: (2,) float32 (binary 0/1)
+            normalize: Whether to normalize features (default: True)
         
         Returns:
             Tensor of shape (feature_size,) on CPU
         """
-        # Flatten board
+        # Flatten board and normalize to [0, 1]
         board_flat = obs['board'].flatten()
-        
-        # Concatenate all features
-        features = np.concatenate([
-            board_flat,
-            obs['my_head'],
-            obs['opp_head'],
-            obs['boosts'],
-            obs['turns'],
-            obs['directions'],
-            obs['alive'],
-        ]).astype(np.float32)
+        if normalize:
+            # Board values are {0, 1, 2}, normalize to [0, 1]
+            board_flat = board_flat / 2.0
+            
+            # Normalize head positions by board dimensions
+            my_head_norm = obs['my_head'] / np.array([self.board_w, self.board_h], dtype=np.float32)
+            opp_head_norm = obs['opp_head'] / np.array([self.board_w, self.board_h], dtype=np.float32)
+            
+            # Normalize boosts by max boosts
+            boosts_norm = obs['boosts'] / config.MAX_BOOST
+            
+            # Normalize turns by max turns
+            turns_norm = obs['turns'] / config.MAX_TURNS
+            
+            # Normalize directions to [0, 1]
+            directions_norm = obs['directions'] / 3.0
+            
+            # Alive is already binary [0, 1]
+            alive_norm = obs['alive']
+            
+            # Concatenate all features
+            features = np.concatenate([
+                board_flat,
+                my_head_norm,
+                opp_head_norm,
+                boosts_norm,
+                turns_norm,
+                directions_norm,
+                alive_norm,
+            ]).astype(np.float32)
+        else:
+            # No normalization (for backward compatibility)
+            features = np.concatenate([
+                board_flat,
+                obs['my_head'],
+                obs['opp_head'],
+                obs['boosts'],
+                obs['turns'],
+                obs['directions'],
+                obs['alive'],
+            ]).astype(np.float32)
         
         # Convert to tensor (CPU only)
         return torch.from_numpy(features).to(self.device)
@@ -179,12 +214,13 @@ class ActorCriticPolicy(nn.Module):
         
         return action_logits, values
     
-    def act(self, obs: Dict[str, np.ndarray]) -> Tuple[int, float, float]:
+    def act(self, obs: Dict[str, np.ndarray], action_mask: np.ndarray = None) -> Tuple[int, float, float]:
         """
-        Select an action given observation.
+        Select an action given observation with optional action masking.
         
         Args:
             obs: Observation dictionary
+            action_mask: Optional boolean mask (1=valid, 0=invalid) of shape (num_actions,)
         
         Returns:
             Tuple of (action, logprob, value)
@@ -198,6 +234,13 @@ class ActorCriticPolicy(nn.Module):
             
             # Forward pass
             action_logits, values = self.forward(obs_tensor)
+            action_logits = action_logits.squeeze(0)  # Remove batch dimension
+            
+            # Apply action mask if provided
+            if action_mask is not None:
+                mask_tensor = torch.from_numpy(action_mask.astype(np.float32)).to(self.device)
+                # Set logits of invalid actions to very negative value
+                action_logits = torch.where(mask_tensor > 0, action_logits, torch.tensor(-1e8, device=self.device))
             
             # Sample action from categorical distribution
             action_probs = F.softmax(action_logits, dim=-1)
@@ -215,26 +258,36 @@ class ActorCriticPolicy(nn.Module):
         return action, logprob, value
     
     def evaluate_actions(self, 
-                        observations: List[Dict[str, np.ndarray]], 
-                        actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                        obs_tensors: torch.Tensor,
+                        actions: torch.Tensor,
+                        action_masks: torch.Tensor = None,
+                        old_values: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Evaluate actions given observations (for PPO update).
+        Evaluate actions given observation tensors (for PPO update).
         
         Args:
-            observations: List of observation dictionaries
+            obs_tensors: Tensor of observations, shape (batch_size, feature_size)
             actions: Tensor of actions taken, shape (batch_size,)
+            action_masks: Optional tensor of action masks, shape (batch_size, num_actions)
+            old_values: Optional tensor of old value estimates for value clipping
         
         Returns:
-            Tuple of (logprobs, values, entropy)
+            Tuple of (logprobs, values, entropy, kl_div)
             - logprobs: Tensor of log probabilities, shape (batch_size,)
             - values: Tensor of value estimates, shape (batch_size,)
             - entropy: Tensor of policy entropy, shape (batch_size,)
+            - kl_div: Scalar tensor of approximate KL divergence (for early stopping)
         """
-        # Convert observations to tensor
-        obs_tensor = self._obs_batch_to_tensor(observations)
+        # Ensure obs_tensors has correct shape
+        if obs_tensors.dim() == 1:
+            obs_tensors = obs_tensors.unsqueeze(0)
         
         # Forward pass
-        action_logits, values = self.forward(obs_tensor)
+        action_logits, values = self.forward(obs_tensors)
+        
+        # Apply action masks if provided
+        if action_masks is not None:
+            action_logits = torch.where(action_masks > 0, action_logits, torch.tensor(-1e8, device=self.device))
         
         # Compute action probabilities and distribution
         action_probs = F.softmax(action_logits, dim=-1)
@@ -249,7 +302,10 @@ class ActorCriticPolicy(nn.Module):
         # Squeeze values to match expected shape
         values = values.squeeze(-1)
         
-        return logprobs, values, entropy
+        # Compute approximate KL divergence (will be 0 if old_values not provided)
+        kl_div = torch.tensor(0.0, device=self.device)
+        
+        return logprobs, values, entropy, kl_div
     
     def get_value(self, obs: Dict[str, np.ndarray]) -> float:
         """

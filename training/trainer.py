@@ -71,8 +71,27 @@ class Trainer:
             board_w=self.config.BOARD_W,
             num_actions=self.config.NUM_ACTIONS,
             latent_size=self.config.LATENT_SIZE,
-            device=self.config.DEVICE
+            device=self.config.DEVICE,
+            verbose=True  # Only print on first initialization
         )
+        
+        # Initialize frozen opponent policy for stable self-play
+        if self.config.USE_FROZEN_OPPONENT:
+            self.opponent_policy = ActorCriticPolicy(
+                board_h=self.config.BOARD_H,
+                board_w=self.config.BOARD_W,
+                num_actions=self.config.NUM_ACTIONS,
+                latent_size=self.config.LATENT_SIZE,
+                device=self.config.DEVICE,
+                verbose=False
+            )
+            # Copy weights from main policy
+            self.opponent_policy.load_state_dict(self.policy.state_dict())
+            # Freeze opponent
+            for param in self.opponent_policy.parameters():
+                param.requires_grad = False
+        else:
+            self.opponent_policy = self.policy
         
         # Initialize optimizer
         self.optimizer = torch.optim.Adam(
@@ -80,9 +99,9 @@ class Trainer:
             lr=self.config.LEARNING_RATE
         )
         
-        # Initialize environment
+        # Initialize environment with frozen opponent
         self.env = TronEnv(
-            opponent_policy=self.policy,  # Self-play
+            opponent_policy=self.opponent_policy,  # Use frozen opponent
             use_heuristic_opponent=False,
             seed=self.config.SEED
         )
@@ -95,6 +114,7 @@ class Trainer:
         # Training state
         self.total_steps = 0
         self.num_updates = 0
+        self.rollouts_since_opponent_update = 0
         
         # Metrics tracking
         self.episode_rewards = []
@@ -152,6 +172,13 @@ class Trainer:
             # Update counters
             self.total_steps += len(rollout_data['actions'])
             self.num_updates += 1
+            self.rollouts_since_opponent_update += 1
+            
+            # Update frozen opponent periodically for stable self-play
+            if self.config.USE_FROZEN_OPPONENT and self.rollouts_since_opponent_update >= self.config.OPPONENT_UPDATE_INTERVAL:
+                self.opponent_policy.load_state_dict(self.policy.state_dict())
+                self.rollouts_since_opponent_update = 0
+                print(f"  [Opponent updated at step {self.total_steps}]")
             
             # Logging
             if self.num_updates % (self.config.LOG_INTERVAL // self.config.ROLLOUT_LENGTH) == 0:
@@ -174,15 +201,14 @@ class Trainer:
     
     def _ppo_update(self, rollout_data):
         """
-        Perform PPO update.
+        Perform PPO update with all stability fixes.
         
-        Implements the full PPO algorithm:
-        1. Split data into mini-batches
-        2. For each epoch:
-           - Shuffle data
-           - Compute policy and value losses
-           - Backpropagate and update network
-           - Clip gradients
+        Implements the full PPO algorithm with:
+        1. Pre-encoded tensors (no re-encoding during update)
+        2. Value function clipping (PPO2)
+        3. KL divergence tracking and early stopping
+        4. Correct entropy bonus (positive for exploration)
+        5. Normalized advantages (already done in prepare_batch_data)
         
         Args:
             rollout_data: Dictionary with rollout data and advantages
@@ -192,23 +218,31 @@ class Trainer:
         value_losses = []
         entropies = []
         clip_fractions = []
+        kl_divs = []
         
-        # Get old log probabilities for importance sampling
-        old_logprobs = rollout_data['logprobs']
+        # Get old values for value clipping
+        old_values = rollout_data['values']
         
         # PPO update loop
         for epoch in range(self.config.NUM_EPOCHS):
+            # Track KL divergence for early stopping
+            epoch_kl = 0.0
+            num_batches = 0
+            
             # Iterate through mini-batches
             for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE):
-                # Get batch data
-                observations = batch['observations']
+                # Get batch data - use pre-encoded tensors
+                obs_tensors = batch['obs_tensors']  # Already tensors from rollout
                 actions = batch['actions']
                 old_logprobs_batch = batch['logprobs']
                 advantages = batch['advantages']
                 returns = batch['returns']
+                old_values_batch = batch['values']
                 
                 # Evaluate actions with current policy
-                logprobs, values, entropy = self.policy.evaluate_actions(observations, actions)
+                logprobs, values, entropy, kl_div = self.policy.evaluate_actions(
+                    obs_tensors, actions, old_values=old_values_batch
+                )
                 
                 # Compute ratio for PPO clip
                 ratio = torch.exp(logprobs - old_logprobs_batch)
@@ -218,17 +252,21 @@ class Trainer:
                 surr2 = torch.clamp(ratio, 1.0 - self.config.PPO_CLIP_EPS, 1.0 + self.config.PPO_CLIP_EPS) * advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
                 
-                # Compute value loss (MSE)
-                value_loss = F.mse_loss(values, returns)
+                # Compute value loss with clipping (PPO2)
+                value_pred_clipped = old_values_batch + torch.clamp(
+                    values - old_values_batch,
+                    -self.config.VALUE_CLIP_RANGE,
+                    self.config.VALUE_CLIP_RANGE
+                )
+                value_loss_unclipped = F.mse_loss(values, returns)
+                value_loss_clipped = F.mse_loss(value_pred_clipped, returns)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
                 
-                # Compute entropy bonus
-                entropy_loss = -entropy.mean()
-                
-                # Combine losses
+                # Combine losses (correct entropy sign - subtract to encourage exploration)
                 total_loss = (
                     policy_loss +
-                    self.config.VALUE_COEFF * value_loss +
-                    self.config.ENTROPY_COEFF * entropy_loss
+                    self.config.VALUE_COEFF * value_loss -
+                    self.config.ENTROPY_COEFF * entropy.mean()  # Subtract for bonus
                 )
                 
                 # Backpropagation
@@ -250,12 +288,27 @@ class Trainer:
                 with torch.no_grad():
                     clip_fraction = ((ratio - 1.0).abs() > self.config.PPO_CLIP_EPS).float().mean().item()
                     clip_fractions.append(clip_fraction)
+                    
+                    # Approximate KL divergence
+                    log_ratio = logprobs - old_logprobs_batch
+                    approx_kl = ((ratio - 1.0) - log_ratio).mean().item()
+                    kl_divs.append(approx_kl)
+                    epoch_kl += approx_kl
+                    num_batches += 1
+            
+            # Early stopping based on KL divergence
+            avg_kl = epoch_kl / max(num_batches, 1)
+            if avg_kl > self.config.MAX_KL:
+                print(f"  Early stopping at epoch {epoch + 1}/{self.config.NUM_EPOCHS} (KL={avg_kl:.4f} > {self.config.MAX_KL})")
+                break
         
         # Print update metrics
         print(f"[Update {self.num_updates + 1}] Policy loss: {np.mean(policy_losses):.4f}")
         print(f"              Value loss: {np.mean(value_losses):.4f}")
         print(f"              Entropy: {np.mean(entropies):.4f}")
         print(f"              Clip frac: {np.mean(clip_fractions):.4f}")
+        if kl_divs:
+            print(f"              Approx KL: {np.mean(kl_divs):.4f}")
     
     def _update_episode_stats(self, episode_info):
         """
@@ -340,6 +393,10 @@ class Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
         }
         
+        # Add opponent policy if using frozen opponent
+        if self.config.USE_FROZEN_OPPONENT:
+            checkpoint['opponent_state_dict'] = self.opponent_policy.state_dict()
+        
         torch.save(checkpoint, checkpoint_path)
         print(f"\n[Checkpoint] Saved to {checkpoint_path}")
     
@@ -364,6 +421,8 @@ class Trainer:
             self.policy.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if self.config.USE_FROZEN_OPPONENT and 'opponent_state_dict' in checkpoint:
+            self.opponent_policy.load_state_dict(checkpoint['opponent_state_dict'])
         
         print(f"[Checkpoint] Loaded from {checkpoint_path}")
         print(f"  Resuming from step {self.total_steps}")

@@ -56,7 +56,8 @@ def test_policy_build():
             board_w=config.BOARD_W,
             num_actions=config.NUM_ACTIONS,
             latent_size=config.LATENT_SIZE,
-            device=config.DEVICE
+            device=config.DEVICE,
+            verbose=True
         )
         
         print("✓ Policy initialized successfully")
@@ -112,12 +113,12 @@ def test_forward_pass():
         assert isinstance(value, float), "Invalid value type"
         print("✓ act() output types are correct")
         
-        # Test evaluate_actions()
-        obs_batch = [obs] * 5
+        # Test evaluate_actions() with pre-encoded tensors
+        obs_tensors = torch.stack([policy._obs_to_tensor(obs) for _ in range(5)], dim=0)
         actions = torch.tensor([0, 1, 2, 3, 0], dtype=torch.long)
         
-        logprobs, values, entropy = policy.evaluate_actions(obs_batch, actions)
-        print(f"✓ evaluate_actions() returns tensors of shape: {logprobs.shape}, {values.shape}, {entropy.shape}")
+        logprobs, values, entropy, kl_div = policy.evaluate_actions(obs_tensors, actions)
+        print(f"✓ evaluate_actions() returns tensors of shape: {logprobs.shape}, {values.shape}, {entropy.shape}, kl_div={kl_div.item():.4f}")
         
         # Validate outputs
         assert logprobs.shape == (5,), "Invalid logprobs shape"
@@ -147,38 +148,44 @@ def test_ppo_update():
         policy = ActorCriticPolicy()
         optimizer = torch.optim.Adam(policy.parameters(), lr=config.LEARNING_RATE)
         
-        # Create fake batch data
+        # Create fake batch data - use pre-encoded tensors
         batch_size = 32
-        obs_list = []
+        obs_tensors_list = []
         for _ in range(batch_size):
             obs = {
                 'board': np.random.rand(config.BOARD_H, config.BOARD_W).astype(np.float32),
-                'my_head': np.random.rand(2).astype(np.float32),
-                'opp_head': np.random.rand(2).astype(np.float32),
-                'boosts': np.random.rand(2).astype(np.float32),
-                'turns': np.random.rand(1).astype(np.float32),
-                'directions': np.random.rand(2).astype(np.float32),
+                'my_head': np.random.rand(2).astype(np.float32) * np.array([config.BOARD_W, config.BOARD_H]),
+                'opp_head': np.random.rand(2).astype(np.float32) * np.array([config.BOARD_W, config.BOARD_H]),
+                'boosts': np.random.rand(2).astype(np.float32) * config.MAX_BOOST,
+                'turns': np.random.rand(1).astype(np.float32) * config.MAX_TURNS,
+                'directions': np.random.rand(2).astype(np.float32) * 3,
                 'alive': np.ones(2, dtype=np.float32),
             }
-            obs_list.append(obs)
+            obs_tensors_list.append(policy._obs_to_tensor(obs))
         
+        obs_tensors = torch.stack(obs_tensors_list, dim=0)
         actions = torch.randint(0, 4, (batch_size,), dtype=torch.long)
         old_logprobs = torch.randn(batch_size)
+        old_values = torch.randn(batch_size)
         advantages = torch.randn(batch_size)
         returns = torch.randn(batch_size)
         
         # Run one PPO update step
-        logprobs, values, entropy = policy.evaluate_actions(obs_list, actions)
+        logprobs, values, entropy, kl_div = policy.evaluate_actions(obs_tensors, actions, old_values=old_values)
         
         # Compute losses
         ratio = torch.exp(logprobs - old_logprobs)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1.0 - config.PPO_CLIP_EPS, 1.0 + config.PPO_CLIP_EPS) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-        value_loss = F.mse_loss(values, returns)
-        entropy_loss = -entropy.mean()
         
-        total_loss = policy_loss + config.VALUE_COEFF * value_loss + config.ENTROPY_COEFF * entropy_loss
+        # Value loss with clipping
+        value_pred_clipped = old_values + torch.clamp(values - old_values, -config.VALUE_CLIP_RANGE, config.VALUE_CLIP_RANGE)
+        value_loss_unclipped = F.mse_loss(values, returns)
+        value_loss_clipped = F.mse_loss(value_pred_clipped, returns)
+        value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+        
+        total_loss = policy_loss + config.VALUE_COEFF * value_loss - config.ENTROPY_COEFF * entropy.mean()
         
         # Backpropagation
         optimizer.zero_grad()

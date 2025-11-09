@@ -44,6 +44,7 @@ class RolloutCollector:
     def reset_storage(self):
         """Reset storage buffers for new rollout collection."""
         self.observations = []
+        self.obs_tensors = []  # Store pre-encoded tensors
         self.actions = []
         self.logprobs = []
         self.rewards = []
@@ -89,8 +90,10 @@ class RolloutCollector:
             # Get action from policy
             action, logprob, value = policy.act(obs)
             
-            # Store observation (before step)
+            # Pre-encode observation to tensor and store both
+            obs_tensor = policy._obs_to_tensor(obs)
             self.observations.append(obs)
+            self.obs_tensors.append(obs_tensor)
             
             # Execute action in environment
             next_obs, reward, done, info = env.step(action)
@@ -124,9 +127,10 @@ class RolloutCollector:
             
             self.step_count += 1
         
-        # Convert to tensors (CPU only)
+        # Convert to tensors (CPU only) - store pre-encoded tensors
         rollout_data = {
-            'observations': self.observations,  # Keep as list of dicts for now
+            'observations': self.observations,  # Keep for backward compatibility
+            'obs_tensors': torch.stack(self.obs_tensors, dim=0),  # Pre-encoded tensors (batch_size, feature_size)
             'actions': torch.tensor(self.actions, dtype=torch.long),
             'logprobs': torch.tensor(self.logprobs, dtype=torch.float32),
             'rewards': torch.tensor(self.rewards, dtype=torch.float32),
@@ -195,7 +199,7 @@ class RolloutCollector:
     
     def prepare_batch_data(self, rollout_data: Dict):
         """
-        Prepare rollout data for PPO training (normalize advantages, etc.).
+        Prepare rollout data for PPO training (normalize advantages, detach tensors).
         
         Args:
             rollout_data: Dictionary from collect() with advantages computed
@@ -203,10 +207,19 @@ class RolloutCollector:
         Returns:
             Processed rollout_data ready for training
         """
+        # Detach advantages, returns, and logprobs to prevent backprop through rollout
+        advantages = rollout_data['advantages'].detach()
+        returns = rollout_data['returns'].detach()
+        logprobs = rollout_data['logprobs'].detach()
+        values = rollout_data['values'].detach()
+        
         # Normalize advantages
-        advantages = rollout_data['advantages']
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
         rollout_data['advantages'] = advantages
+        rollout_data['returns'] = returns
+        rollout_data['logprobs'] = logprobs
+        rollout_data['values'] = values
         
         return rollout_data
     
@@ -232,7 +245,8 @@ class RolloutCollector:
             batch_indices = indices[start:end]
             
             batch = {
-                'observations': [rollout_data['observations'][i] for i in batch_indices],
+                'observations': [rollout_data['observations'][i] for i in batch_indices],  # Backward compatibility
+                'obs_tensors': rollout_data['obs_tensors'][batch_indices],  # Pre-encoded tensors
                 'actions': rollout_data['actions'][batch_indices],
                 'logprobs': rollout_data['logprobs'][batch_indices],
                 'advantages': rollout_data['advantages'][batch_indices],
