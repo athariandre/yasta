@@ -229,8 +229,8 @@ class Trainer:
             epoch_kl = 0.0
             num_batches = 0
             
-            # Iterate through mini-batches
-            for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE):
+            # Iterate through mini-batches (pass policy for observation encoding)
+            for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE, policy=self.policy):
                 # Get batch data - use pre-encoded tensors
                 obs_tensors = batch['obs_tensors']  # Already tensors from rollout
                 actions = batch['actions']
@@ -239,9 +239,13 @@ class Trainer:
                 returns = batch['returns']
                 old_values_batch = batch['values']
                 
-                # Evaluate actions with current policy
+                # Evaluate actions with current policy (include action_masks)
                 logprobs, values, entropy, kl_div = self.policy.evaluate_actions(
-                    obs_tensors, actions, old_values=old_values_batch, old_logprobs=old_logprobs_batch
+                    obs_tensors,
+                    actions,
+                    action_masks=batch["action_masks"],
+                    old_values=old_values_batch,
+                    old_logprobs=old_logprobs_batch
                 )
                 
                 # Compute ratio for PPO clip

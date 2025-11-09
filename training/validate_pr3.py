@@ -312,6 +312,7 @@ def main():
     print("\n" + "="*60)
     if all_pass:
         print("✓✓✓ ALL VALIDATION CHECKS PASSED ✓✓✓")
+        print("✓ Action mask integration validated (PR-4)")
     else:
         print("✗✗✗ SOME CHECKS FAILED ✗✗✗")
     print("="*60 + "\n")

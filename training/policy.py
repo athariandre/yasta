@@ -180,6 +180,18 @@ class ActorCriticPolicy(nn.Module):
         # Convert to tensor (CPU only)
         return torch.from_numpy(features).to(self.device)
     
+    def encode_obs(self, obs):
+        """
+        Helper for rollout to request encoded observations.
+        
+        Args:
+            obs: Observation dictionary
+        
+        Returns:
+            Encoded observation tensor
+        """
+        return self._obs_to_tensor(obs)
+    
     def _obs_batch_to_tensor(self, obs_list: List[Dict[str, np.ndarray]]) -> torch.Tensor:
         """
         Convert list of observations to batched tensor.
