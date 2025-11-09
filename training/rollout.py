@@ -46,6 +46,7 @@ class RolloutCollector:
         self.observations = []
         self.obs_tensors = []  # Store pre-encoded tensors
         self.actions = []
+        self.action_masks = []  # Store action masks
         self.logprobs = []
         self.rewards = []
         self.dones = []
@@ -61,21 +62,20 @@ class RolloutCollector:
         
         Args:
             env: Environment instance
-            policy: Policy with act(obs) -> (action, logprob, value)
+            policy: Policy with act(obs, action_mask) -> (action, logprob, value)
             num_steps: Number of steps to collect (default: self.rollout_length)
         
         Returns:
             Dictionary containing:
-            - observations: List of observations
-            - obs_tensors: Stacked tensor of pre-encoded observations
-            - actions: torch.Tensor of actions
-            - logprobs: torch.Tensor of log probabilities
-            - rewards: torch.Tensor of rewards
-            - dones: torch.Tensor of done flags
-            - values: torch.Tensor of value estimates
-            - episode_info: Dict with episode statistics
-            - last_obs: Final observation for bootstrapping
-            - last_done: Whether final step was terminal
+            - obs: List of raw observation dicts
+            - actions: np.ndarray of actions
+            - action_masks: np.ndarray of action masks
+            - logprobs: np.ndarray of log probabilities
+            - values: np.ndarray of value estimates
+            - rewards: np.ndarray of rewards
+            - dones: np.ndarray of done flags
+            - final_obs: Single observation dict for bootstrapping
+            - episode_info: Dict with episode statistics including completed_episodes
         """
         if num_steps is None:
             num_steps = self.rollout_length
@@ -88,27 +88,28 @@ class RolloutCollector:
         episode_length = 0
         
         completed_episodes = []
-        last_obs = obs
-        last_done = False
+        final_obs = obs
         
         for step in range(num_steps):
-            # Get action from policy
-            action, logprob, value = policy.act(obs)
+            # Compute action mask using policy's mask function
+            action_mask = policy._compute_legal_actions_mask(obs)
             
-            # Pre-encode observation to tensor and store both
-            obs_tensor = policy._obs_to_tensor(obs)
+            # Get action from policy with action mask
+            action, logprob, value = policy.act(obs, action_mask)
+            
+            # Store observation (raw dict)
             self.observations.append(obs)
-            self.obs_tensors.append(obs_tensor)
             
             # Execute action in environment
             next_obs, reward, done, info = env.step(action)
             
-            # Store transition
+            # Store transition (as lists, will convert to numpy later)
             self.actions.append(action)
+            self.action_masks.append(action_mask)
             self.logprobs.append(logprob)
+            self.values.append(value)
             self.rewards.append(reward)
             self.dones.append(done)
-            self.values.append(value)
             
             # Track episode stats
             episode_reward += reward
@@ -120,34 +121,31 @@ class RolloutCollector:
                 completed_episodes.append({
                     'reward': episode_reward,
                     'length': episode_length,
-                    'outcome': info.get('result_pov', info.get('result', None)),  # Use POV result
+                    'outcome': info.get('result_pov', info.get('result', None)),
                 })
                 
-                # Reset environment
+                # Reset environment and continue collecting within same rollout
                 obs = env.reset()
                 episode_reward = 0.0
                 episode_length = 0
-                last_done = True
             else:
                 obs = next_obs
-                last_done = False
             
-            # Track last observation for bootstrapping
-            last_obs = obs
+            # Track final observation for bootstrapping
+            final_obs = obs
             
             self.step_count += 1
         
-        # Convert to tensors (CPU only) - store pre-encoded tensors
+        # Convert to numpy arrays (CPU only, no tensors during rollout)
         rollout_data = {
-            'observations': self.observations,  # Keep for backward compatibility
-            'obs_tensors': torch.stack(self.obs_tensors, dim=0),  # Pre-encoded tensors (batch_size, feature_size)
-            'actions': torch.tensor(self.actions, dtype=torch.long),
-            'logprobs': torch.tensor(self.logprobs, dtype=torch.float32),
-            'rewards': torch.tensor(self.rewards, dtype=torch.float32),
-            'dones': torch.tensor(self.dones, dtype=torch.float32),
-            'values': torch.tensor(self.values, dtype=torch.float32),
-            'last_obs': last_obs,  # For GAE bootstrapping
-            'last_done': last_done,  # Whether final step was terminal
+            'obs': self.observations,  # List of raw observation dicts
+            'actions': np.array(self.actions, dtype=np.int64),
+            'action_masks': np.array(self.action_masks, dtype=np.float32),
+            'logprobs': np.array(self.logprobs, dtype=np.float32),
+            'values': np.array(self.values, dtype=np.float32),
+            'rewards': np.array(self.rewards, dtype=np.float32),
+            'dones': np.array(self.dones, dtype=np.float32),
+            'final_obs': final_obs,  # Single observation dict for bootstrapping
             'episode_info': {
                 'completed_episodes': completed_episodes,
                 'num_completed': len(completed_episodes),
@@ -162,6 +160,14 @@ class RolloutCollector:
         """
         Compute GAE (Generalized Advantage Estimation) advantages and returns.
         
+        Implements:
+            delta_t = r_t + gamma * V_{t+1} * (1 - done_{t+1}) - V_t
+            A_t = delta_t + gamma * lambda * (1 - done_{t+1}) * A_{t+1}
+        
+        Bootstrapping:
+            V_bootstrap = policy.get_value(final_obs) if final step is not terminal
+            V_bootstrap = 0 if final step is terminal (done=True)
+        
         Args:
             rollout_data: Dictionary from collect()
             gamma: Discount factor
@@ -169,7 +175,7 @@ class RolloutCollector:
             policy: Policy for bootstrapping value on final step
         
         Returns:
-            Updated rollout_data with 'advantages' and 'returns' keys
+            Updated rollout_data with 'advantages' and 'returns' keys (numpy arrays)
         """
         if gamma is None:
             gamma = config.GAMMA
@@ -181,29 +187,42 @@ class RolloutCollector:
         dones = rollout_data['dones']
         
         num_steps = len(rewards)
-        advantages = torch.zeros_like(rewards)
-        returns = torch.zeros_like(rewards)
+        advantages = np.zeros_like(rewards)
         
-        # Compute advantages using GAE
+        # Compute bootstrap value for final step
+        # If rollout ends in terminal state (done=True), bootstrap_value = 0
+        # If rollout ends in non-terminal state (done=False), bootstrap from critic
+        final_done = dones[-1] if num_steps > 0 else True
+        if final_done:
+            bootstrap_value = 0.0
+        else:
+            if policy is not None:
+                bootstrap_value = policy.get_value(rollout_data['final_obs'])
+            else:
+                bootstrap_value = 0.0
+        
+        # Compute advantages using GAE in reverse order
         gae = 0.0
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
-                # Bootstrap from critic on final next-obs when not done
-                if not rollout_data['last_done'] and policy is not None:
-                    next_value = policy.get_value(rollout_data['last_obs'])
-                    next_non_terminal = 1.0
-                else:
-                    next_value = 0.0
-                    next_non_terminal = 0.0
+                # Last step uses bootstrap value
+                next_value = bootstrap_value
             else:
                 next_value = values[t + 1]
-                next_non_terminal = 1.0 - dones[t]
             
+            # Always use dones[t] for consistent GAE weighting
+            # If dones[t] == True, episode ended at step t, don't bootstrap
+            # If dones[t] == False, continue GAE propagation
+            next_non_terminal = 1.0 - dones[t]
+            
+            # TD error: delta_t = r_t + gamma * V_{t+1} * (1 - done_t) - V_t
             delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
+            
+            # GAE: A_t = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}
             gae = delta + gamma * gae_lambda * next_non_terminal * gae
             advantages[t] = gae
         
-        # Compute returns (advantages + values)
+        # Compute returns: returns = advantages + values
         returns = advantages + values
         
         rollout_data['advantages'] = advantages
@@ -213,40 +232,88 @@ class RolloutCollector:
     
     def prepare_batch_data(self, rollout_data: Dict):
         """
-        Prepare rollout data for PPO training (normalize advantages, detach tensors).
+        Prepare rollout data for PPO training.
+        
+        Converts everything to torch tensors and normalizes advantages:
+            advantages = (advantages - mean) / (std + 1e-8)
+        
+        Produces:
+            - obs_tensors: shape (T, feature_size)
+            - actions: shape (T,)
+            - action_masks: shape (T, num_actions)
+            - logprobs: shape (T,)
+            - values: shape (T,)
+            - returns: shape (T,)
+            - advantages: normalized
         
         Args:
             rollout_data: Dictionary from collect() with advantages computed
         
         Returns:
-            Processed rollout_data ready for training
+            Processed rollout_data ready for training (all numpy arrays converted to tensors)
         """
-        # Detach advantages, returns, and logprobs to prevent backprop through rollout
-        advantages = rollout_data['advantages'].detach()
-        returns = rollout_data['returns'].detach()
-        logprobs = rollout_data['logprobs'].detach()
-        values = rollout_data['values'].detach()
+        # Convert observations to tensors - need to encode obs list
+        # Use policy's encode_obs if available, otherwise use _obs_to_tensor
+        # For now, we'll need policy access - this will be handled by trainer
+        # For prepare_batch_data, we'll store as-is and convert in get_mini_batches
         
-        # Normalize advantages
+        # Convert numpy arrays to torch tensors
+        advantages = torch.from_numpy(rollout_data['advantages']).float()
+        returns = torch.from_numpy(rollout_data['returns']).float()
+        logprobs = torch.from_numpy(rollout_data['logprobs']).float()
+        values = torch.from_numpy(rollout_data['values']).float()
+        actions = torch.from_numpy(rollout_data['actions']).long()
+        action_masks = torch.from_numpy(rollout_data['action_masks']).float()
+        rewards = torch.from_numpy(rollout_data['rewards']).float()
+        dones = torch.from_numpy(rollout_data['dones']).float()
+        
+        # Move tensors to device for efficiency
+        device = torch.device(config.DEVICE)
+        advantages = advantages.to(device)
+        returns = returns.to(device)
+        logprobs = logprobs.to(device)
+        values = values.to(device)
+        actions = actions.to(device)
+        action_masks = action_masks.to(device)
+        rewards = rewards.to(device)
+        dones = dones.to(device)
+        
+        # Normalize advantages: (advantages - mean) / (std + 1e-8)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
+        # Update rollout_data with tensors
         rollout_data['advantages'] = advantages
         rollout_data['returns'] = returns
         rollout_data['logprobs'] = logprobs
         rollout_data['values'] = values
+        rollout_data['actions'] = actions
+        rollout_data['action_masks'] = action_masks
+        rollout_data['rewards'] = rewards
+        rollout_data['dones'] = dones
         
         return rollout_data
     
-    def get_mini_batches(self, rollout_data: Dict, batch_size: int = None):
+    def get_mini_batches(self, rollout_data: Dict, batch_size: int = None, policy=None):
         """
         Split rollout data into mini-batches for PPO training.
+        
+        Shuffles indices and yields mini-batches with matching ordering for every tensor.
+        Encodes observations to tensors on-the-fly using policy.encode_obs().
         
         Args:
             rollout_data: Dictionary from prepare_batch_data()
             batch_size: Size of mini-batches
+            policy: Policy object for encoding observations (required)
         
         Yields:
-            Mini-batch dictionaries
+            Mini-batch dictionaries with:
+            - obs_tensors: (batch_size, feature_size)
+            - actions: (batch_size,)
+            - action_masks: (batch_size, num_actions)
+            - logprobs: (batch_size,)
+            - values: (batch_size,)
+            - returns: (batch_size,)
+            - advantages: (batch_size,)
         """
         if batch_size is None:
             batch_size = config.BATCH_SIZE
@@ -258,10 +325,19 @@ class RolloutCollector:
             end = min(start + batch_size, num_steps)
             batch_indices = indices[start:end]
             
+            # Encode observations using policy
+            obs_list = [rollout_data['obs'][i] for i in batch_indices]
+            if policy is not None:
+                # Use policy.encode_obs() to encode observations and ensure device consistency
+                obs_tensors = torch.stack([policy.encode_obs(obs) for obs in obs_list], dim=0).to(policy.device)
+            else:
+                # Fallback: just use empty tensors (should not happen)
+                obs_tensors = torch.zeros((len(batch_indices), 1))
+            
             batch = {
-                'observations': [rollout_data['observations'][i] for i in batch_indices],  # Backward compatibility
-                'obs_tensors': rollout_data['obs_tensors'][batch_indices],  # Pre-encoded tensors
+                'obs_tensors': obs_tensors,
                 'actions': rollout_data['actions'][batch_indices],
+                'action_masks': rollout_data['action_masks'][batch_indices],
                 'logprobs': rollout_data['logprobs'][batch_indices],
                 'advantages': rollout_data['advantages'][batch_indices],
                 'returns': rollout_data['returns'][batch_indices],

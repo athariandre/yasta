@@ -229,19 +229,24 @@ class Trainer:
             epoch_kl = 0.0
             num_batches = 0
             
-            # Iterate through mini-batches
-            for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE):
-                # Get batch data - use pre-encoded tensors
-                obs_tensors = batch['obs_tensors']  # Already tensors from rollout
-                actions = batch['actions']
-                old_logprobs_batch = batch['logprobs']
-                advantages = batch['advantages']
-                returns = batch['returns']
-                old_values_batch = batch['values']
+            # Iterate through mini-batches (pass policy for observation encoding)
+            for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE, policy=self.policy):
+                # Get batch data and move to device
+                obs_tensors = batch['obs_tensors'].to(self.config.DEVICE)
+                actions = batch['actions'].to(self.config.DEVICE)
+                old_logprobs_batch = batch['logprobs'].to(self.config.DEVICE)
+                advantages = batch['advantages'].to(self.config.DEVICE)
+                returns = batch['returns'].to(self.config.DEVICE)
+                old_values_batch = batch['values'].to(self.config.DEVICE)
+                action_masks = batch['action_masks'].to(self.config.DEVICE)
                 
-                # Evaluate actions with current policy
+                # Evaluate actions with current policy (include action_masks)
                 logprobs, values, entropy, kl_div = self.policy.evaluate_actions(
-                    obs_tensors, actions, old_values=old_values_batch, old_logprobs=old_logprobs_batch
+                    obs_tensors,
+                    actions,
+                    action_masks=action_masks,
+                    old_values=old_values_batch,
+                    old_logprobs=old_logprobs_batch
                 )
                 
                 # Compute ratio for PPO clip
@@ -292,10 +297,9 @@ class Trainer:
                     # Use KL divergence from evaluate_actions (already computed)
                     approx_kl = kl_div.item()
                     
-                    # Ensure KL is finite
-                    if not torch.isfinite(kl_div):
-                        print(f"  Warning: Non-finite KL detected, skipping batch")
-                        continue
+                    # Ensure KL is finite (fallback to force early stop if NaN)
+                    if not np.isfinite(approx_kl):
+                        approx_kl = self.config.MAX_KL * 2  # Force early stop
                     
                     kl_divs.append(approx_kl)
                     epoch_kl += approx_kl

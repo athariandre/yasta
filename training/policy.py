@@ -180,6 +180,18 @@ class ActorCriticPolicy(nn.Module):
         # Convert to tensor (CPU only)
         return torch.from_numpy(features).to(self.device)
     
+    def encode_obs(self, obs):
+        """
+        Helper for rollout to request encoded observations.
+        
+        Args:
+            obs: Observation dictionary
+        
+        Returns:
+            Encoded observation tensor (detached from computation graph, on device)
+        """
+        return self._obs_to_tensor(obs).to(self.device).detach()
+    
     def _obs_batch_to_tensor(self, obs_list: List[Dict[str, np.ndarray]]) -> torch.Tensor:
         """
         Convert list of observations to batched tensor.
@@ -340,6 +352,10 @@ class ActorCriticPolicy(nn.Module):
         if obs_tensors.dim() == 1:
             obs_tensors = obs_tensors.unsqueeze(0)
         
+        # Ensure actions has correct shape
+        if actions.dim() == 0:
+            actions = actions.unsqueeze(0)
+        
         # Forward pass
         action_logits, values = self.forward(obs_tensors)
         
@@ -370,8 +386,10 @@ class ActorCriticPolicy(nn.Module):
         # Compute approximate KL divergence
         if old_logprobs is not None:
             # KL divergence: KL = old_log_prob - new_log_prob
-            kl = old_logprobs - logprobs
-            kl_div = kl.mean()
+            # Clamp to avoid NaN from unstable samples
+            kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
+            # Use absolute value for stability
+            kl_div = kl.mean().abs()
         else:
             kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         
