@@ -103,9 +103,21 @@ def test_forward_pass():
             'alive': np.array([1, 1], dtype=np.float32),
         }
         
-        # Test act() without mask (automatic masking)
+        # Test act() without mask (automatic masking with legal moves)
         action, logprob, value = policy.act(obs)
         print(f"✓ act() without mask: action={action}, logprob={logprob:.4f}, value={value:.4f}")
+        
+        # Test legal action mask computation
+        legal_mask = policy._compute_legal_actions_mask(obs)
+        print(f"✓ Legal mask computed: {legal_mask}")
+        assert legal_mask.sum() > 0, "At least one action should be legal"
+        
+        # Test boundary cases
+        obs_corner = obs.copy()
+        obs_corner['my_head'] = np.array([0, 0], dtype=np.float32)
+        mask_corner = policy._compute_legal_actions_mask(obs_corner)
+        print(f"✓ Corner mask (0,0): {mask_corner} (up and left should be illegal)")
+        assert mask_corner[0] == 0 and mask_corner[3] == 0, "Boundary checking failed"
         
         # Test act() with explicit mask
         mask = np.array([1, 1, 0, 0], dtype=np.float32)
@@ -130,9 +142,10 @@ def test_forward_pass():
         print(f"✓ evaluate_actions() with old_logprobs: KL={kl_div.item():.4f}")
         assert kl_div.item() != 0.0, "KL should be non-zero with old_logprobs"
         
-        # Test without old_logprobs
+        # Test without old_logprobs (should use default all-legal mask)
         logprobs, values, entropy, kl_div = policy.evaluate_actions(obs_tensors, actions)
-        print(f"✓ evaluate_actions() without old_logprobs: KL={kl_div.item():.4f}")
+        print(f"✓ evaluate_actions() without masks: KL={kl_div.item():.4f}")
+        print(f"  (default all-legal mask applied)")
         assert kl_div.item() == 0.0, "KL should be zero without old_logprobs"
         
         # Validate output shapes

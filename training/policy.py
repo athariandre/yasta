@@ -216,10 +216,7 @@ class ActorCriticPolicy(nn.Module):
     
     def _compute_legal_actions_mask(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
         """
-        Compute legal action mask from observation.
-        
-        Note: This is a simplified heuristic. For full game-rule compliance,
-        the environment should provide the mask directly.
+        Compute legal action mask from observation based on board boundaries and collisions.
         
         Args:
             obs: Observation dictionary with board state
@@ -227,11 +224,46 @@ class ActorCriticPolicy(nn.Module):
         Returns:
             Boolean mask (1=legal, 0=illegal) of shape (num_actions,)
         """
-        # For now, return all actions as valid
-        # TODO: Implement proper legal move detection based on game rules
-        # This would require checking board boundaries and collision detection
-        # which should ideally come from the environment
-        return np.ones(self.num_actions, dtype=np.float32)
+        # Initialize all actions as legal
+        mask = np.ones(self.num_actions, dtype=np.float32)
+        
+        # Get current head position
+        my_head = obs['my_head']  # (x, y) format
+        x, y = int(my_head[0]), int(my_head[1])
+        
+        # Get board dimensions
+        board = obs['board']
+        board_h, board_w = board.shape
+        
+        # Direction mappings: 0=up, 1=right, 2=down, 3=left
+        # Board coordinates: y increases downward, x increases rightward
+        directions = [
+            (0, -1),  # up: y decreases
+            (1, 0),   # right: x increases
+            (0, 1),   # down: y increases
+            (-1, 0),  # left: x decreases
+        ]
+        
+        # Check each action for legality
+        for action_idx, (dx, dy) in enumerate(directions):
+            nx, ny = x + dx, y + dy
+            
+            # Check bounds
+            if nx < 0 or nx >= board_w or ny < 0 or ny >= board_h:
+                mask[action_idx] = 0.0
+                continue
+            
+            # Check collision with non-empty cells (walls, trails)
+            # board[ny][nx] == 0 means empty, != 0 means occupied
+            if board[ny][nx] != 0:
+                mask[action_idx] = 0.0
+        
+        # Ensure at least one action is legal (safety fallback)
+        if mask.sum() == 0:
+            # If all moves are illegal, allow all (agent will have to pick best bad option)
+            mask = np.ones(self.num_actions, dtype=np.float32)
+        
+        return mask
     
     def act(self, obs: Dict[str, np.ndarray], action_mask: np.ndarray = None) -> Tuple[int, float, float]:
         """
@@ -311,12 +343,16 @@ class ActorCriticPolicy(nn.Module):
         # Forward pass
         action_logits, values = self.forward(obs_tensors)
         
-        # Apply action masks if provided
-        # Note: During PPO training, we don't recompute masks from observations
-        # The masks should be provided if action masking was used during rollout
-        if action_masks is not None:
-            action_logits = torch.where(action_masks > 0, action_logits, 
-                                       torch.tensor(-1e8, dtype=torch.float32, device=self.device))
+        # Apply action masks
+        # If no masks provided, assume all actions are legal (fallback)
+        if action_masks is None:
+            # Fallback: treat all actions as legal for now
+            # Later PRs can improve this by recomputing masks from observations
+            action_masks = torch.ones_like(action_logits, dtype=torch.float32)
+        
+        # Apply masking to logits
+        action_logits = torch.where(action_masks > 0, action_logits, 
+                                   torch.tensor(-1e8, dtype=torch.float32, device=self.device))
         
         # Compute action probabilities and distribution
         action_probs = F.softmax(action_logits, dim=-1)
