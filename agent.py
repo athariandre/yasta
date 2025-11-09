@@ -45,6 +45,15 @@ def next_pos(head, dir_name, steps=1):
         x, y = torus(x + dx, y + dy)
     return (x, y)
 
+def get_blocked_cells():
+    """Get all blocked cells from board grid state."""
+    blocked = set()
+    for y in range(H):
+        for x in range(W):
+            if GLOBAL_GAME.board.grid[y][x] != 0:
+                blocked.add((x, y))
+    return blocked
+
 def is_free(cell, my_set, opp_set):
     """Check if a cell is free (not in trails and board cell is empty)."""
     return (cell not in my_set and 
@@ -69,20 +78,23 @@ def flood_area(start, blocked, cap=200):
     return count
 
 def voronoi_margin(my_next, opp_head, blocked):
-    """Dual-BFS Voronoi to compute territory difference."""
+    """Dual-BFS Voronoi to compute territory difference.
+    
+    Head positions are always treated as free for their respective BFS seeds,
+    even if they appear in blocked set or board state.
+    """
     q = deque()
     seen = {}
     
-    if my_next not in blocked:
-        q.append((my_next, 1))  # player 1
-        seen[my_next] = 1
+    # Always add starting positions (heads are free for their owner)
+    q.append((my_next, 1))  # player 1
+    seen[my_next] = 1
     
-    if opp_head not in blocked:
-        q.append((opp_head, 2))  # player 2
-        seen[opp_head] = 2
+    q.append((opp_head, 2))  # player 2
+    seen[opp_head] = 2
     
-    my_cells = 1 if my_next in seen and seen[my_next] == 1 else 0
-    opp_cells = 1 if opp_head in seen and seen[opp_head] == 2 else 0
+    my_cells = 1
+    opp_cells = 1
     
     while q:
         (x, y), player = q.popleft()
@@ -98,24 +110,22 @@ def voronoi_margin(my_next, opp_head, blocked):
     
     return my_cells - opp_cells
 
-def predict_opponent_next(opp_head, opp_trail, my_trail_set, opp_trail_set):
-    """Predict opponent's next move (1-ply)."""
-    # Get opponent's current direction if possible
+def predict_opponent_next(opp_head, opp_agent, my_trail_set, opp_trail_set):
+    """Predict opponent's next move (1-ply).
+    
+    Uses agent.direction from engine instead of inferring from trail positions.
+    """
+    # Get opponent's current direction from engine
     opp_dir = None
-    if len(opp_trail) >= 2:
-        prev = opp_trail[-2]
-        dx = opp_head[0] - prev[0]
-        dy = opp_head[1] - prev[1]
-        # Normalize for torus
-        if abs(dx) > 1:
-            dx = -1 if dx > 0 else 1
-        if abs(dy) > 1:
-            dy = -1 if dy > 0 else 1
-        
-        for dir_name, (ddx, ddy) in DIRS.items():
-            if (ddx, ddy) == (dx, dy):
-                opp_dir = dir_name
-                break
+    if hasattr(opp_agent, 'direction') and opp_agent.direction:
+        # Map Direction enum to string
+        dir_map = {
+            Direction.UP: "UP",
+            Direction.DOWN: "DOWN",
+            Direction.LEFT: "LEFT",
+            Direction.RIGHT: "RIGHT"
+        }
+        opp_dir = dir_map.get(opp_agent.direction)
     
     # Try to continue in current direction if legal
     if opp_dir:
@@ -126,7 +136,7 @@ def predict_opponent_next(opp_head, opp_trail, my_trail_set, opp_trail_set):
     # Otherwise, pick best legal move by flood area
     best_move = None
     best_area = -1
-    blocked = my_trail_set | opp_trail_set
+    blocked = get_blocked_cells()
     
     for dir_name in ORDER:
         opp_next = next_pos(opp_head, dir_name, 1)
@@ -148,12 +158,14 @@ def compute_neighbor_degree(pos, blocked):
     return degree
 
 def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set, 
-                  tick, my_dir, boosts_remaining, use_boost=False):
+                  tick, my_dir, boosts_remaining, opp_agent, use_boost=False):
     """Evaluate a candidate move and return its score."""
     steps = 2 if use_boost else 1
     
+    # Get blocked cells from board grid (includes all AGENT-marked cells)
+    blocked = get_blocked_cells()
+    
     # Check if move is legal (both steps if boost)
-    blocked = my_trail_set | opp_trail_set
     legal = True
     current_pos = my_head
     
@@ -190,7 +202,7 @@ def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set,
     opp_trapped = 1 if (opp_degree <= 1 and opp_area < 8) else 0
     
     # Head-on collision risk
-    opp_pred_next = predict_opponent_next(opp_head, list(opp_trail_set), 
+    opp_pred_next = predict_opponent_next(opp_head, opp_agent, 
                                            my_trail_set, opp_trail_set)
     head_on_pen = 1 if (opp_pred_next and final_pos == opp_pred_next) else 0
     
@@ -228,22 +240,17 @@ def decide_best_move(player_number):
         
         boosts_remaining = my_agent.boosts_remaining
         
-        # Get current direction
+        # Get current direction from engine
         my_dir = None
-        if len(my_agent.trail) >= 2:
-            prev = my_agent.trail[-2]
-            dx = my_head[0] - prev[0]
-            dy = my_head[1] - prev[1]
-            # Normalize for torus
-            if abs(dx) > 1:
-                dx = -1 if dx > 0 else 1
-            if abs(dy) > 1:
-                dy = -1 if dy > 0 else 1
-            
-            for dir_name, (ddx, ddy) in DIRS.items():
-                if (ddx, ddy) == (dx, dy):
-                    my_dir = dir_name
-                    break
+        if hasattr(my_agent, 'direction') and my_agent.direction:
+            # Map Direction enum to string
+            dir_map = {
+                Direction.UP: "UP",
+                Direction.DOWN: "DOWN",
+                Direction.LEFT: "LEFT",
+                Direction.RIGHT: "RIGHT"
+            }
+            my_dir = dir_map.get(my_agent.direction)
     
     # Evaluate all candidate moves
     best_move = ORDER[0]
@@ -258,8 +265,8 @@ def decide_best_move(player_number):
         
         # Evaluate 1-step move
         score_1 = evaluate_move(dir_name, my_head, my_trail_set, opp_head, 
-                               opp_trail_set, tick, my_dir, boosts_remaining, 
-                               use_boost=False)
+                               opp_trail_set, tick, my_dir, boosts_remaining,
+                               opp_agent, use_boost=False)
         
         if score_1 > best_score:
             best_score = score_1
@@ -269,8 +276,8 @@ def decide_best_move(player_number):
         # Evaluate 2-step boost move if we have boosts
         if boosts_remaining > 0:
             score_2 = evaluate_move(dir_name, my_head, my_trail_set, opp_head, 
-                                   opp_trail_set, tick, my_dir, boosts_remaining, 
-                                   use_boost=True)
+                                   opp_trail_set, tick, my_dir, boosts_remaining,
+                                   opp_agent, use_boost=True)
             
             # Boost policy: use boost if it gives significant advantage
             use_boost_for_this = False
