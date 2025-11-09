@@ -54,15 +54,41 @@ def get_blocked_cells():
                 blocked.add((x, y))
     return blocked
 
-def is_free(cell, my_set, opp_set):
-    """Check if a cell is free (not in trails and board cell is empty)."""
-    return (cell not in my_set and 
-            cell not in opp_set and 
-            GLOBAL_GAME.board.get_cell_state(cell) == 0)
+def is_free(cell, blocked, my_head=None, opp_head=None):
+    """Check if a cell is free.
+    
+    A cell is free if:
+    - It's not in the blocked set
+    - OR it's one of the head positions (heads can move out of their position)
+    
+    Args:
+        cell: Position to check
+        blocked: Set of blocked cells
+        my_head: Optional current head position (treated as free)
+        opp_head: Optional opponent head position (treated as free)
+    """
+    if cell in blocked:
+        # Heads are allowed to move out of their current position
+        if my_head and cell == my_head:
+            return True
+        if opp_head and cell == opp_head:
+            return True
+        return False
+    return True
 
-def flood_area(start, blocked, cap=200):
-    """Bounded flood-fill to measure mobility from a starting position."""
-    if start in blocked:
+def flood_area(start, blocked, cap=200, treat_as_free=None):
+    """Bounded flood-fill to measure mobility from a starting position.
+    
+    Args:
+        start: Starting position
+        blocked: Set of blocked cells
+        cap: Maximum cells to explore (early stop)
+        treat_as_free: Set of positions to treat as free even if in blocked
+    """
+    if treat_as_free is None:
+        treat_as_free = set()
+    
+    if start in blocked and start not in treat_as_free:
         return 0
     q = deque([start])
     seen = {start}
@@ -72,16 +98,24 @@ def flood_area(start, blocked, cap=200):
         count += 1
         for dx, dy in DIRS.values():
             nx, ny = torus(x + dx, y + dy)
-            if (nx, ny) not in blocked and (nx, ny) not in seen:
-                seen.add((nx, ny))
-                q.append((nx, ny))
+            if (nx, ny) not in seen:
+                # Cell is free if not blocked OR in treat_as_free set
+                if (nx, ny) not in blocked or (nx, ny) in treat_as_free:
+                    seen.add((nx, ny))
+                    q.append((nx, ny))
     return count
 
-def voronoi_margin(my_next, opp_head, blocked):
+def voronoi_margin(my_next, opp_head, blocked, cap=150):
     """Dual-BFS Voronoi to compute territory difference.
     
     Head positions are always treated as free for their respective BFS seeds,
     even if they appear in blocked set or board state.
+    
+    Args:
+        my_next: My next position
+        opp_head: Opponent's head position
+        blocked: Set of blocked cells
+        cap: Maximum cells to explore per player (performance optimization)
     """
     q = deque()
     seen = {}
@@ -96,8 +130,14 @@ def voronoi_margin(my_next, opp_head, blocked):
     my_cells = 1
     opp_cells = 1
     
-    while q:
+    # Cap total exploration to avoid timeout
+    total_explored = 0
+    max_total = cap * 2
+    
+    while q and total_explored < max_total:
         (x, y), player = q.popleft()
+        total_explored += 1
+        
         for dx, dy in DIRS.values():
             nx, ny = torus(x + dx, y + dy)
             if (nx, ny) not in blocked and (nx, ny) not in seen:
@@ -110,10 +150,17 @@ def voronoi_margin(my_next, opp_head, blocked):
     
     return my_cells - opp_cells
 
-def predict_opponent_next(opp_head, opp_agent, my_trail_set, opp_trail_set):
+def predict_opponent_next(opp_head, opp_agent, blocked, my_head, opp_head_pos):
     """Predict opponent's next move (1-ply).
     
-    Uses agent.direction from engine instead of inferring from trail positions.
+    Uses agent.direction from engine and simulated blocked state.
+    
+    Args:
+        opp_head: Opponent's current head position
+        opp_agent: Opponent agent object (for direction)
+        blocked: Current blocked cells set
+        my_head: My head position (treated as free)
+        opp_head_pos: Opponent head position (treated as free)
     """
     # Get opponent's current direction from engine
     opp_dir = None
@@ -130,36 +177,49 @@ def predict_opponent_next(opp_head, opp_agent, my_trail_set, opp_trail_set):
     # Try to continue in current direction if legal
     if opp_dir:
         opp_next = next_pos(opp_head, opp_dir, 1)
-        if is_free(opp_next, opp_trail_set, my_trail_set):
+        if is_free(opp_next, blocked, my_head, opp_head_pos):
             return opp_next
     
     # Otherwise, pick best legal move by flood area
     best_move = None
     best_area = -1
-    blocked = get_blocked_cells()
     
     for dir_name in ORDER:
         opp_next = next_pos(opp_head, dir_name, 1)
-        if is_free(opp_next, opp_trail_set, my_trail_set):
-            area = flood_area(opp_next, blocked, cap=200)
+        if is_free(opp_next, blocked, my_head, opp_head_pos):
+            # Treat both heads as free for mobility calculation
+            area = flood_area(opp_next, blocked, cap=200, treat_as_free={my_head, opp_head_pos})
             if area > best_area:
                 best_area = area
                 best_move = opp_next
     
     return best_move
 
-def compute_neighbor_degree(pos, blocked):
-    """Count number of free neighbors around a position."""
+def compute_neighbor_degree(pos, blocked, treat_as_free=None):
+    """Count number of free neighbors around a position.
+    
+    Args:
+        pos: Position to check
+        blocked: Set of blocked cells
+        treat_as_free: Set of positions to treat as free even if in blocked
+    """
+    if treat_as_free is None:
+        treat_as_free = set()
+    
     degree = 0
     for dx, dy in DIRS.values():
         nx, ny = torus(pos[0] + dx, pos[1] + dy)
-        if (nx, ny) not in blocked:
+        if (nx, ny) not in blocked or (nx, ny) in treat_as_free:
             degree += 1
     return degree
 
 def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set, 
                   tick, my_dir, boosts_remaining, opp_agent, use_boost=False):
-    """Evaluate a candidate move and return its score."""
+    """Evaluate a candidate move and return its score.
+    
+    Simulates the move and incorporates opponent's predicted next position
+    for accurate world modeling.
+    """
     steps = 2 if use_boost else 1
     
     # Get blocked cells from board grid (includes all AGENT-marked cells)
@@ -171,7 +231,7 @@ def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set,
     
     for step in range(steps):
         next = next_pos(current_pos, dir_name, 1)
-        if not is_free(next, my_trail_set, opp_trail_set):
+        if not is_free(next, blocked, my_head, opp_head):
             legal = False
             break
         current_pos = next
@@ -181,7 +241,7 @@ def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set,
     
     final_pos = current_pos
     
-    # Compute features
+    # Compute features with simulated world state
     # Update blocked set with our new positions
     new_blocked = blocked.copy()
     temp_pos = my_head
@@ -189,21 +249,31 @@ def evaluate_move(dir_name, my_head, my_trail_set, opp_head, opp_trail_set,
         temp_pos = next_pos(temp_pos, dir_name, 1)
         new_blocked.add(temp_pos)
     
-    area = flood_area(final_pos, new_blocked, cap=200)
-    vor = voronoi_margin(final_pos, opp_head, new_blocked)
+    # Predict opponent's next move and add to blocked (1-ply simulation)
+    opp_pred_next = predict_opponent_next(opp_head, opp_agent, blocked, my_head, opp_head)
+    if opp_pred_next:
+        new_blocked.add(opp_pred_next)
     
-    # Self-trap detection
-    my_degree = compute_neighbor_degree(final_pos, new_blocked)
+    # Heads should be treated as free for mobility calculations
+    heads_free = {my_head, opp_head}
+    
+    # Mobility: flood area from our final position
+    area = flood_area(final_pos, new_blocked, cap=200, treat_as_free=heads_free)
+    
+    # Territory: Voronoi margin (capped at 150 per player)
+    vor = voronoi_margin(final_pos, opp_head, new_blocked, cap=150)
+    
+    # Self-trap detection (treat heads as free for degree calculation)
+    my_degree = compute_neighbor_degree(final_pos, new_blocked, treat_as_free=heads_free)
     self_trapped = 1 if (my_degree <= 1 and area < 8) else 0
     
-    # Opp-trap detection
-    opp_degree = compute_neighbor_degree(opp_head, new_blocked)
-    opp_area = flood_area(opp_head, new_blocked, cap=200)
+    # Opp-trap detection (use opponent's predicted position if available)
+    opp_eval_pos = opp_pred_next if opp_pred_next else opp_head
+    opp_degree = compute_neighbor_degree(opp_eval_pos, new_blocked, treat_as_free=heads_free)
+    opp_area = flood_area(opp_eval_pos, new_blocked, cap=200, treat_as_free=heads_free)
     opp_trapped = 1 if (opp_degree <= 1 and opp_area < 8) else 0
     
     # Head-on collision risk
-    opp_pred_next = predict_opponent_next(opp_head, opp_agent, 
-                                           my_trail_set, opp_trail_set)
     head_on_pen = 1 if (opp_pred_next and final_pos == opp_pred_next) else 0
     
     # Forward preference (continue current direction)
