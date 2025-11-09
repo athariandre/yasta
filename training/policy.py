@@ -389,7 +389,7 @@ class ActorCriticPolicy(nn.Module):
             # Check for NaN/inf in old_logprobs
             if not torch.isfinite(old_logprobs).all():
                 # Return large sentinel to trigger early stop
-                kl_div = torch.tensor(self.device).new_full((), 1e6)
+                kl_div = torch.tensor(1e6, dtype=torch.float32, device=self.device)
             else:
                 # Clamp to avoid NaN from unstable samples
                 kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
@@ -397,7 +397,7 @@ class ActorCriticPolicy(nn.Module):
                 kl_div = kl.mean().abs()
                 # Final check for NaN/inf
                 if not torch.isfinite(kl_div):
-                    kl_div = torch.tensor(self.device).new_full((), 1e6)
+                    kl_div = torch.tensor(1e6, dtype=torch.float32, device=self.device)
         else:
             kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         

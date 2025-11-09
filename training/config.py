@@ -9,9 +9,9 @@ from datetime import datetime
 class TrainingConfig:
     """Configuration class for training pipeline."""
     
-    # Board dimensions (spec requires 15x15)
-    BOARD_H = 15
-    BOARD_W = 15
+    # Board dimensions (from case_closed_game.py - actual game board)
+    BOARD_H = 18
+    BOARD_W = 20
     
     # Random seed for reproducibility
     SEED = 42
