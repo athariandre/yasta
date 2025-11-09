@@ -126,6 +126,12 @@ def test_forward_pass():
         assert entropy.shape == (5,), "Invalid entropy shape"
         print("✓ evaluate_actions() output shapes are correct")
         
+        # Test get_value() for GAE bootstrapping
+        bootstrap_value = policy.get_value(obs)
+        print(f"✓ get_value() returns: {bootstrap_value:.4f}")
+        assert isinstance(bootstrap_value, float), "Invalid get_value type"
+        print("✓ get_value() works for GAE bootstrapping")
+        
         return True
     except Exception as e:
         print(f"✗ Forward pass failed: {e}")
