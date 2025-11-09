@@ -207,18 +207,18 @@ class RolloutCollector:
             if t == num_steps - 1:
                 # Last step uses bootstrap value
                 next_value = bootstrap_value
-                next_non_terminal = 1.0 - final_done
             else:
                 next_value = values[t + 1]
-                # Use dones[t] to check if current step ended episode
-                # When done=True, env.reset() is called, so next obs is from new episode
-                # We should not bootstrap across episode boundaries
-                next_non_terminal = 1.0 - dones[t]
             
-            # TD error: delta_t = r_t + gamma * V_{t+1} * (1 - done_{t+1}) - V_t
+            # Always use dones[t] for consistent GAE weighting
+            # If dones[t] == True, episode ended at step t, don't bootstrap
+            # If dones[t] == False, continue GAE propagation
+            next_non_terminal = 1.0 - dones[t]
+            
+            # TD error: delta_t = r_t + gamma * V_{t+1} * (1 - done_t) - V_t
             delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
             
-            # GAE: A_t = delta_t + gamma * lambda * (1 - done_{t+1}) * A_{t+1}
+            # GAE: A_t = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}
             gae = delta + gamma * gae_lambda * next_non_terminal * gae
             advantages[t] = gae
         
