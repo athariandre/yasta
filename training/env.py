@@ -33,19 +33,19 @@ class TronEnv:
     - Observation and reward computation
     """
     
-    # Action space: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
+    # Action space: 0=up, 1=right, 2=down, 3=left (per spec)
     ACTION_TO_DIRECTION = {
         0: Direction.UP,
-        1: Direction.DOWN,
-        2: Direction.LEFT,
-        3: Direction.RIGHT,
+        1: Direction.RIGHT,
+        2: Direction.DOWN,
+        3: Direction.LEFT,
     }
     
     DIRECTION_TO_ACTION = {
         Direction.UP: 0,
-        Direction.DOWN: 1,
-        Direction.LEFT: 2,
-        Direction.RIGHT: 3,
+        Direction.RIGHT: 1,
+        Direction.DOWN: 2,
+        Direction.LEFT: 3,
     }
     
     def __init__(self, opponent_policy=None, use_heuristic_opponent=False, seed=None):
