@@ -297,10 +297,9 @@ class Trainer:
                     # Use KL divergence from evaluate_actions (already computed)
                     approx_kl = kl_div.item()
                     
-                    # Ensure KL is finite
-                    if not torch.isfinite(kl_div):
-                        print(f"  Warning: Non-finite KL detected, skipping batch")
-                        continue
+                    # Ensure KL is finite (fallback to force early stop if NaN)
+                    if not np.isfinite(approx_kl):
+                        approx_kl = self.config.MAX_KL * 2  # Force early stop
                     
                     kl_divs.append(approx_kl)
                     epoch_kl += approx_kl

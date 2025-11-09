@@ -264,6 +264,17 @@ class RolloutCollector:
         rewards = torch.from_numpy(rollout_data['rewards']).float()
         dones = torch.from_numpy(rollout_data['dones']).float()
         
+        # Move tensors to device for efficiency
+        device = torch.device(config.DEVICE)
+        advantages = advantages.to(device)
+        returns = returns.to(device)
+        logprobs = logprobs.to(device)
+        values = values.to(device)
+        actions = actions.to(device)
+        action_masks = action_masks.to(device)
+        rewards = rewards.to(device)
+        dones = dones.to(device)
+        
         # Normalize advantages: (advantages - mean) / (std + 1e-8)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         

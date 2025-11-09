@@ -188,9 +188,9 @@ class ActorCriticPolicy(nn.Module):
             obs: Observation dictionary
         
         Returns:
-            Encoded observation tensor
+            Encoded observation tensor (detached from computation graph)
         """
-        return self._obs_to_tensor(obs)
+        return self._obs_to_tensor(obs).detach()
     
     def _obs_batch_to_tensor(self, obs_list: List[Dict[str, np.ndarray]]) -> torch.Tensor:
         """
@@ -351,6 +351,10 @@ class ActorCriticPolicy(nn.Module):
         # Ensure obs_tensors has correct shape
         if obs_tensors.dim() == 1:
             obs_tensors = obs_tensors.unsqueeze(0)
+        
+        # Ensure actions has correct shape
+        if actions.dim() == 0:
+            actions = actions.unsqueeze(0)
         
         # Forward pass
         action_logits, values = self.forward(obs_tensors)
