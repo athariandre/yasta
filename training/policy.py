@@ -383,13 +383,21 @@ class ActorCriticPolicy(nn.Module):
         # Squeeze values to match expected shape
         values = values.squeeze(-1)
         
-        # Compute approximate KL divergence
+        # Compute approximate KL divergence with NaN guard
         if old_logprobs is not None:
             # KL divergence: KL = old_log_prob - new_log_prob
-            # Clamp to avoid NaN from unstable samples
-            kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
-            # Use absolute value for stability
-            kl_div = kl.mean().abs()
+            # Check for NaN/inf in old_logprobs
+            if not torch.isfinite(old_logprobs).all():
+                # Return large sentinel to trigger early stop
+                kl_div = torch.tensor(self.device).new_full((), 1e6)
+            else:
+                # Clamp to avoid NaN from unstable samples
+                kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
+                # Use absolute value for stability
+                kl_div = kl.mean().abs()
+                # Final check for NaN/inf
+                if not torch.isfinite(kl_div):
+                    kl_div = torch.tensor(self.device).new_full((), 1e6)
         else:
             kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         

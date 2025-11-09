@@ -1,4 +1,17 @@
-Flask
-requests
-numpy
-torch
+# Core dependencies
+Flask==3.0.0
+requests==2.31.0
+
+# ML dependencies (CPU-only PyTorch)
+numpy==1.24.3
+torch==2.1.0
+
+# Training utilities
+tqdm==4.66.1
+
+# Optional: TensorBoard for visualization
+tensorboard==2.15.1
+
+# Testing
+pytest==7.4.3
+
