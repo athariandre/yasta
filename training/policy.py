@@ -382,7 +382,8 @@ class ActorCriticPolicy(nn.Module):
         # Compute approximate KL divergence
         if old_logprobs is not None:
             # KL divergence: KL = old_log_prob - new_log_prob
-            kl = old_logprobs - logprobs
+            # Clamp to avoid NaN from unstable samples
+            kl = torch.clamp(old_logprobs - logprobs, min=-1e6, max=1e6)
             kl_div = kl.mean()
         else:
             kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
