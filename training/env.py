@@ -59,7 +59,8 @@ class TronEnv:
         """
         self.seed = seed if seed is not None else config.SEED
         self.rng = random.Random(self.seed)
-        np.random.seed(self.seed)
+        # Note: Global numpy seeding is handled by Trainer.set_seed()
+        # We use a local random.Random instance for env-specific randomness
         
         self.opponent_policy = opponent_policy
         self.use_heuristic_opponent = use_heuristic_opponent
@@ -133,6 +134,11 @@ class TronEnv:
         This is a basic survival heuristic that tries to:
         1. Avoid immediate collisions
         2. Prefer moves with more open space
+        
+        TODO (PR-4): Allow head-on when winning by trail length or when fully boxed
+        Currently this heuristic avoids all blocked cells including opponent head,
+        which means it will never select a deliberate head-on collision even when
+        that would be optimal (e.g., winning on length in endgame).
         
         Args:
             obs: Observation dictionary
@@ -223,7 +229,7 @@ class TronEnv:
             outcome = info['result']
         else:
             obs = obs_p2
-            # Flip outcome for player 2
+            # Flip outcome for player 2 perspective
             if info['result'] == GameResult.AGENT1_WIN:
                 outcome = GameResult.AGENT2_WIN
             elif info['result'] == GameResult.AGENT2_WIN:
@@ -246,10 +252,12 @@ class TronEnv:
         self.episode_reward += reward
         self.prev_obs = obs
         
-        # Add episode info
+        # Add episode info with both engine result and POV result
         info['episode_steps'] = self.episode_steps
         info['episode_reward'] = self.episode_reward
         info['my_player_number'] = self.my_player_number
+        info['result_pov'] = outcome  # My perspective (win/loss/draw)
+        # info['result'] remains the engine's perspective for debugging
         
         return obs, reward, done, info
     

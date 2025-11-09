@@ -47,8 +47,9 @@ class LocalGame:
         Returns:
             Initial observation for player 1
         """
-        # Reset RNG for deterministic behavior
-        random.seed(self.seed)
+        # Note: Global RNG seeding is handled by Trainer.set_seed()
+        # We rely on the trainer's seed policy for deterministic behavior
+        # rather than re-seeding here to avoid conflicts with other modules
         
         # Create new game instance
         self.game = Game()

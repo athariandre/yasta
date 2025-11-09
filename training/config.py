@@ -50,6 +50,10 @@ class TrainingConfig:
     # Environment settings
     MAX_TURNS = 200  # max turns per episode (from game rules)
     NUM_ACTIONS = 4  # UP, DOWN, LEFT, RIGHT
+    
+    # Performance settings
+    VORONOI_CAP = 150  # max cells to explore per player in Voronoi BFS
+    FLOOD_FILL_CAP = 200  # max cells to explore in flood fill (mobility)
 
 # Create default config instance
 config = TrainingConfig()

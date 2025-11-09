@@ -22,7 +22,7 @@ from case_closed_game import GameResult
 from training.config import config
 
 
-def compute_voronoi_margin(my_head, opp_head, blocked, board_h=18, board_w=20, cap=150):
+def compute_voronoi_margin(my_head, opp_head, blocked, board_h=18, board_w=20, cap=None):
     """
     Compute Voronoi territory difference using dual BFS.
     
@@ -32,11 +32,14 @@ def compute_voronoi_margin(my_head, opp_head, blocked, board_h=18, board_w=20, c
         blocked: Set of blocked cells
         board_h: Board height
         board_w: Board width
-        cap: Maximum cells to explore per player
+        cap: Maximum cells to explore per player (uses config default if None)
     
     Returns:
         Margin (my_cells - opp_cells)
     """
+    if cap is None:
+        cap = config.VORONOI_CAP
+    
     def torus(x, y):
         return (x % board_w, y % board_h)
     
@@ -75,7 +78,7 @@ def compute_voronoi_margin(my_head, opp_head, blocked, board_h=18, board_w=20, c
     return my_cells - opp_cells
 
 
-def compute_reachable_area(start, blocked, board_h=18, board_w=20, cap=200):
+def compute_reachable_area(start, blocked, board_h=18, board_w=20, cap=None):
     """
     Compute reachable area from a starting position using flood fill.
     
@@ -84,11 +87,14 @@ def compute_reachable_area(start, blocked, board_h=18, board_w=20, cap=200):
         blocked: Set of blocked cells
         board_h: Board height
         board_w: Board width
-        cap: Maximum cells to explore
+        cap: Maximum cells to explore (uses config default if None)
     
     Returns:
         Number of reachable cells
     """
+    if cap is None:
+        cap = config.FLOOD_FILL_CAP
+    
     def torus(x, y):
         return (x % board_w, y % board_h)
     
@@ -214,11 +220,17 @@ def compute_reward(prev_obs: Dict[str, np.ndarray],
     blocked = get_blocked_cells(next_obs)
     
     prev_my_head = tuple(prev_obs['my_head'].astype(int))
+    prev_opp_head = tuple(prev_obs['opp_head'].astype(int))
     prev_blocked = get_blocked_cells(prev_obs)
+    
+    # Create blocked sets for reward evaluation, excluding heads (they are free to move)
+    # This aligns with the game semantics where heads can move out of their current position
+    blocked_for_eval = blocked - {my_head, opp_head}
+    prev_blocked_for_eval = prev_blocked - {prev_my_head, prev_opp_head}
     
     # 2. Space Control Reward (Voronoi margin)
     voronoi_margin = compute_voronoi_margin(
-        my_head, opp_head, blocked,
+        my_head, opp_head, blocked_for_eval,
         board_h=config.BOARD_H, board_w=config.BOARD_W
     )
     total_cells = config.BOARD_H * config.BOARD_W
@@ -227,7 +239,7 @@ def compute_reward(prev_obs: Dict[str, np.ndarray],
     
     # 3. Mobility Reward (reachable area)
     reachable = compute_reachable_area(
-        my_head, blocked,
+        my_head, blocked_for_eval,
         board_h=config.BOARD_H, board_w=config.BOARD_W
     )
     mobility_reward = config.REWARD_MOBILITY * reachable
@@ -235,7 +247,7 @@ def compute_reward(prev_obs: Dict[str, np.ndarray],
     
     # 4. Trap Avoidance Penalty
     degree = compute_neighbor_degree(
-        my_head, blocked,
+        my_head, blocked_for_eval,
         board_h=config.BOARD_H, board_w=config.BOARD_W
     )
     if degree <= 1:
@@ -253,7 +265,7 @@ def compute_reward(prev_obs: Dict[str, np.ndarray],
     if boost_used:
         # Compare reachable area before and after boost
         prev_reachable = compute_reachable_area(
-            prev_my_head, prev_blocked,
+            prev_my_head, prev_blocked_for_eval,
             board_h=config.BOARD_H, board_w=config.BOARD_W
         )
         

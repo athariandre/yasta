@@ -197,12 +197,14 @@ class Trainer:
             self.episode_lengths.append(episode['length'])
             self.total_episodes += 1
             
-            # Track outcomes
+            # Track outcomes from agent's perspective (using result_pov)
             outcome = episode['outcome']
-            if outcome == GameResult.AGENT1_WIN or outcome == GameResult.AGENT2_WIN:
-                # In self-play, we need to track from perspective of our agent
-                # For now, just count as win (will be refined with player tracking)
+            # In self-play, AGENT1_WIN means we won (from our POV)
+            # because result_pov is already flipped in TronEnv
+            if outcome == GameResult.AGENT1_WIN:
                 self.win_counts['win'] += 1
+            elif outcome == GameResult.AGENT2_WIN:
+                self.win_counts['loss'] = self.win_counts.get('loss', 0) + 1
             elif outcome == GameResult.DRAW:
                 self.win_counts['draw'] += 1
         

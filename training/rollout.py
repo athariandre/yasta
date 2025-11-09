@@ -108,11 +108,11 @@ class RolloutCollector:
             
             # Handle episode termination
             if done:
-                # Store episode stats
+                # Store episode stats with POV-corrected outcome
                 completed_episodes.append({
                     'reward': episode_reward,
                     'length': episode_length,
-                    'outcome': info.get('result', None),
+                    'outcome': info.get('result_pov', info.get('result', None)),  # Use POV result
                 })
                 
                 # Reset environment
@@ -171,7 +171,11 @@ class RolloutCollector:
         gae = 0.0
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
-                next_value = 0.0  # Bootstrap value (could use critic on final obs)
+                # TODO (PR-3): Bootstrap from critic on final next-obs when not done
+                # For now, we use 0.0 as next_value for the final step
+                # When implementing the real policy network, query the critic here:
+                #   next_value = policy.evaluate_value(observations[t+1]) if not done[t] else 0.0
+                next_value = 0.0  # Bootstrap value (will use critic in PR-3)
                 next_non_terminal = 0.0
             else:
                 next_value = values[t + 1]
