@@ -241,7 +241,7 @@ class Trainer:
                 
                 # Evaluate actions with current policy
                 logprobs, values, entropy, kl_div = self.policy.evaluate_actions(
-                    obs_tensors, actions, old_values=old_values_batch
+                    obs_tensors, actions, old_values=old_values_batch, old_logprobs=old_logprobs_batch
                 )
                 
                 # Compute ratio for PPO clip
@@ -284,17 +284,16 @@ class Trainer:
                 value_losses.append(value_loss.item())
                 entropies.append(entropy.mean().item())
                 
-                # Track clip fraction
+                # Track clip fraction and KL divergence
                 with torch.no_grad():
                     clip_fraction = ((ratio - 1.0).abs() > self.config.PPO_CLIP_EPS).float().mean().item()
                     clip_fractions.append(clip_fraction)
                     
-                    # Approximate KL divergence (corrected formula)
-                    # Use simple and stable: mean(old_log_prob - new_log_prob)
-                    approx_kl = (old_logprobs_batch - logprobs).mean().item()
+                    # Use KL divergence from evaluate_actions (already computed)
+                    approx_kl = kl_div.item()
                     
                     # Ensure KL is finite
-                    if not torch.isfinite(torch.tensor(approx_kl)):
+                    if not torch.isfinite(kl_div):
                         print(f"  Warning: Non-finite KL detected, skipping batch")
                         continue
                     

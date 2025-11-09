@@ -261,7 +261,8 @@ class ActorCriticPolicy(nn.Module):
                         obs_tensors: torch.Tensor,
                         actions: torch.Tensor,
                         action_masks: torch.Tensor = None,
-                        old_values: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                        old_values: torch.Tensor = None,
+                        old_logprobs: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate actions given observation tensors (for PPO update).
         
@@ -270,6 +271,7 @@ class ActorCriticPolicy(nn.Module):
             actions: Tensor of actions taken, shape (batch_size,)
             action_masks: Optional tensor of action masks, shape (batch_size, num_actions)
             old_values: Optional tensor of old value estimates for value clipping
+            old_logprobs: Optional tensor of old log probabilities for KL computation
         
         Returns:
             Tuple of (logprobs, values, entropy, kl_div)
@@ -302,8 +304,13 @@ class ActorCriticPolicy(nn.Module):
         # Squeeze values to match expected shape
         values = values.squeeze(-1)
         
-        # Compute approximate KL divergence (will be 0 if old_values not provided)
-        kl_div = torch.tensor(0.0, device=self.device)
+        # Compute approximate KL divergence
+        if old_logprobs is not None:
+            # KL divergence: KL = old_log_prob - new_log_prob
+            kl = old_logprobs - logprobs
+            kl_div = kl.mean()
+        else:
+            kl_div = torch.tensor(0.0, device=self.device)
         
         return logprobs, values, entropy, kl_div
     
