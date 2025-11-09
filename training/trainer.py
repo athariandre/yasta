@@ -158,8 +158,8 @@ class Trainer:
             # Update episode statistics
             self._update_episode_stats(rollout_data['episode_info'])
             
-            # Compute advantages (GAE)
-            rollout_data = self.rollout_collector.compute_advantages(rollout_data)
+            # Compute advantages (GAE) with bootstrapping
+            rollout_data = self.rollout_collector.compute_advantages(rollout_data, policy=self.policy)
             
             # Prepare data for training
             rollout_data = self.rollout_collector.prepare_batch_data(rollout_data)
@@ -289,9 +289,15 @@ class Trainer:
                     clip_fraction = ((ratio - 1.0).abs() > self.config.PPO_CLIP_EPS).float().mean().item()
                     clip_fractions.append(clip_fraction)
                     
-                    # Approximate KL divergence
-                    log_ratio = logprobs - old_logprobs_batch
-                    approx_kl = ((ratio - 1.0) - log_ratio).mean().item()
+                    # Approximate KL divergence (corrected formula)
+                    # Use simple and stable: mean(old_log_prob - new_log_prob)
+                    approx_kl = (old_logprobs_batch - logprobs).mean().item()
+                    
+                    # Ensure KL is finite
+                    if not torch.isfinite(torch.tensor(approx_kl)):
+                        print(f"  Warning: Non-finite KL detected, skipping batch")
+                        continue
+                    
                     kl_divs.append(approx_kl)
                     epoch_kl += approx_kl
                     num_batches += 1

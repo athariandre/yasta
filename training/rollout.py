@@ -67,12 +67,15 @@ class RolloutCollector:
         Returns:
             Dictionary containing:
             - observations: List of observations
+            - obs_tensors: Stacked tensor of pre-encoded observations
             - actions: torch.Tensor of actions
             - logprobs: torch.Tensor of log probabilities
             - rewards: torch.Tensor of rewards
             - dones: torch.Tensor of done flags
             - values: torch.Tensor of value estimates
             - episode_info: Dict with episode statistics
+            - last_obs: Final observation for bootstrapping
+            - last_done: Whether final step was terminal
         """
         if num_steps is None:
             num_steps = self.rollout_length
@@ -85,6 +88,8 @@ class RolloutCollector:
         episode_length = 0
         
         completed_episodes = []
+        last_obs = obs
+        last_done = False
         
         for step in range(num_steps):
             # Get action from policy
@@ -122,8 +127,13 @@ class RolloutCollector:
                 obs = env.reset()
                 episode_reward = 0.0
                 episode_length = 0
+                last_done = True
             else:
                 obs = next_obs
+                last_done = False
+            
+            # Track last observation for bootstrapping
+            last_obs = obs
             
             self.step_count += 1
         
@@ -136,6 +146,8 @@ class RolloutCollector:
             'rewards': torch.tensor(self.rewards, dtype=torch.float32),
             'dones': torch.tensor(self.dones, dtype=torch.float32),
             'values': torch.tensor(self.values, dtype=torch.float32),
+            'last_obs': last_obs,  # For GAE bootstrapping
+            'last_done': last_done,  # Whether final step was terminal
             'episode_info': {
                 'completed_episodes': completed_episodes,
                 'num_completed': len(completed_episodes),
@@ -146,7 +158,7 @@ class RolloutCollector:
         
         return rollout_data
     
-    def compute_advantages(self, rollout_data: Dict, gamma: float = None, gae_lambda: float = None):
+    def compute_advantages(self, rollout_data: Dict, gamma: float = None, gae_lambda: float = None, policy=None):
         """
         Compute GAE (Generalized Advantage Estimation) advantages and returns.
         
@@ -154,6 +166,7 @@ class RolloutCollector:
             rollout_data: Dictionary from collect()
             gamma: Discount factor
             gae_lambda: GAE lambda parameter
+            policy: Policy for bootstrapping value on final step
         
         Returns:
             Updated rollout_data with 'advantages' and 'returns' keys
@@ -175,12 +188,13 @@ class RolloutCollector:
         gae = 0.0
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
-                # TODO (PR-3): Bootstrap from critic on final next-obs when not done
-                # For now, we use 0.0 as next_value for the final step
-                # When implementing the real policy network, query the critic here:
-                #   next_value = policy.evaluate_value(observations[t+1]) if not done[t] else 0.0
-                next_value = 0.0  # Bootstrap value (will use critic in PR-3)
-                next_non_terminal = 0.0
+                # Bootstrap from critic on final next-obs when not done
+                if not rollout_data['last_done'] and policy is not None:
+                    next_value = policy.get_value(rollout_data['last_obs'])
+                    next_non_terminal = 1.0
+                else:
+                    next_value = 0.0
+                    next_non_terminal = 0.0
             else:
                 next_value = values[t + 1]
                 next_non_terminal = 1.0 - dones[t]
