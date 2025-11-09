@@ -134,6 +134,7 @@ class LocalGame:
         Returns:
             Dictionary of numpy arrays (CPU only)
         """
+        # PR-3: observations must be stable for NN input
         # Get board grid as numpy array
         board = np.array(self.game.board.grid, dtype=np.float32)
         

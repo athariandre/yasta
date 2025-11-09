@@ -14,6 +14,7 @@ import random
 import time
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 
 import sys
@@ -21,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.config import config
 from training.env import TronEnv
-from training.rollout import RolloutCollector, DummyPolicy
+from training.rollout import RolloutCollector
+from training.policy import ActorCriticPolicy
 from case_closed_game import GameResult
 
 
@@ -63,12 +65,43 @@ class Trainer:
         # Set seeds for reproducibility
         set_seed(self.config.SEED)
         
-        # Initialize policy (DummyPolicy for PR-2, will be NN in PR-3)
-        self.policy = DummyPolicy(action_space=self.config.NUM_ACTIONS)
+        # Initialize policy (Neural network for PR-3)
+        self.policy = ActorCriticPolicy(
+            board_h=self.config.BOARD_H,
+            board_w=self.config.BOARD_W,
+            num_actions=self.config.NUM_ACTIONS,
+            latent_size=self.config.LATENT_SIZE,
+            device=self.config.DEVICE,
+            verbose=True  # Only print on first initialization
+        )
         
-        # Initialize environment
+        # Initialize frozen opponent policy for stable self-play
+        if self.config.USE_FROZEN_OPPONENT:
+            self.opponent_policy = ActorCriticPolicy(
+                board_h=self.config.BOARD_H,
+                board_w=self.config.BOARD_W,
+                num_actions=self.config.NUM_ACTIONS,
+                latent_size=self.config.LATENT_SIZE,
+                device=self.config.DEVICE,
+                verbose=False
+            )
+            # Copy weights from main policy
+            self.opponent_policy.load_state_dict(self.policy.state_dict())
+            # Freeze opponent
+            for param in self.opponent_policy.parameters():
+                param.requires_grad = False
+        else:
+            self.opponent_policy = self.policy
+        
+        # Initialize optimizer
+        self.optimizer = torch.optim.Adam(
+            self.policy.parameters(),
+            lr=self.config.LEARNING_RATE
+        )
+        
+        # Initialize environment with frozen opponent
         self.env = TronEnv(
-            opponent_policy=self.policy,  # Self-play
+            opponent_policy=self.opponent_policy,  # Use frozen opponent
             use_heuristic_opponent=False,
             seed=self.config.SEED
         )
@@ -81,6 +114,7 @@ class Trainer:
         # Training state
         self.total_steps = 0
         self.num_updates = 0
+        self.rollouts_since_opponent_update = 0
         
         # Metrics tracking
         self.episode_rewards = []
@@ -124,8 +158,8 @@ class Trainer:
             # Update episode statistics
             self._update_episode_stats(rollout_data['episode_info'])
             
-            # Compute advantages (GAE)
-            rollout_data = self.rollout_collector.compute_advantages(rollout_data)
+            # Compute advantages (GAE) with bootstrapping
+            rollout_data = self.rollout_collector.compute_advantages(rollout_data, policy=self.policy)
             
             # Prepare data for training
             rollout_data = self.rollout_collector.prepare_batch_data(rollout_data)
@@ -138,6 +172,13 @@ class Trainer:
             # Update counters
             self.total_steps += len(rollout_data['actions'])
             self.num_updates += 1
+            self.rollouts_since_opponent_update += 1
+            
+            # Update frozen opponent periodically for stable self-play
+            if self.config.USE_FROZEN_OPPONENT and self.rollouts_since_opponent_update >= self.config.OPPONENT_UPDATE_INTERVAL:
+                self.opponent_policy.load_state_dict(self.policy.state_dict())
+                self.rollouts_since_opponent_update = 0
+                print(f"  [Opponent updated at step {self.total_steps}]")
             
             # Logging
             if self.num_updates % (self.config.LOG_INTERVAL // self.config.ROLLOUT_LENGTH) == 0:
@@ -160,30 +201,119 @@ class Trainer:
     
     def _ppo_update(self, rollout_data):
         """
-        Perform PPO update (placeholder for PR-2).
+        Perform PPO update with all stability fixes.
         
-        In PR-3, this will:
-        1. Split data into mini-batches
-        2. Compute policy and value losses
-        3. Backpropagate and update network
-        4. Clip gradients
+        Implements the full PPO algorithm with:
+        1. Pre-encoded tensors (no re-encoding during update)
+        2. Value function clipping (PPO2)
+        3. KL divergence tracking and early stopping
+        4. Correct entropy bonus (positive for exploration)
+        5. Normalized advantages (already done in prepare_batch_data)
         
         Args:
             rollout_data: Dictionary with rollout data and advantages
         """
-        # Placeholder: In PR-3, this will contain actual PPO update logic
+        # Tracking metrics
+        policy_losses = []
+        value_losses = []
+        entropies = []
+        clip_fractions = []
+        kl_divs = []
         
-        # For now, just iterate through mini-batches to validate structure
+        # Get old values for value clipping
+        old_values = rollout_data['values']
+        
+        # PPO update loop
         for epoch in range(self.config.NUM_EPOCHS):
+            # Track KL divergence for early stopping
+            epoch_kl = 0.0
+            num_batches = 0
+            
+            # Iterate through mini-batches
             for batch in self.rollout_collector.get_mini_batches(rollout_data, batch_size=self.config.BATCH_SIZE):
-                # In PR-3: compute losses and update network
-                # For now: just validate batch structure
-                assert 'observations' in batch
-                assert 'actions' in batch
-                assert 'advantages' in batch
-                assert 'returns' in batch
-                # Last batch may be smaller than BATCH_SIZE
-                assert len(batch['actions']) > 0
+                # Get batch data - use pre-encoded tensors
+                obs_tensors = batch['obs_tensors']  # Already tensors from rollout
+                actions = batch['actions']
+                old_logprobs_batch = batch['logprobs']
+                advantages = batch['advantages']
+                returns = batch['returns']
+                old_values_batch = batch['values']
+                
+                # Evaluate actions with current policy
+                logprobs, values, entropy, kl_div = self.policy.evaluate_actions(
+                    obs_tensors, actions, old_values=old_values_batch, old_logprobs=old_logprobs_batch
+                )
+                
+                # Compute ratio for PPO clip
+                ratio = torch.exp(logprobs - old_logprobs_batch)
+                
+                # Compute policy loss (PPO clip objective)
+                surr1 = ratio * advantages
+                surr2 = torch.clamp(ratio, 1.0 - self.config.PPO_CLIP_EPS, 1.0 + self.config.PPO_CLIP_EPS) * advantages
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # Compute value loss with clipping (PPO2)
+                value_pred_clipped = old_values_batch + torch.clamp(
+                    values - old_values_batch,
+                    -self.config.VALUE_CLIP_RANGE,
+                    self.config.VALUE_CLIP_RANGE
+                )
+                value_loss_unclipped = F.mse_loss(values, returns)
+                value_loss_clipped = F.mse_loss(value_pred_clipped, returns)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                
+                # Combine losses (correct entropy sign - subtract to encourage exploration)
+                total_loss = (
+                    policy_loss +
+                    self.config.VALUE_COEFF * value_loss -
+                    self.config.ENTROPY_COEFF * entropy.mean()  # Subtract for bonus
+                )
+                
+                # Backpropagation
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.MAX_GRAD_NORM)
+                
+                # Optimizer step
+                self.optimizer.step()
+                
+                # Track metrics
+                policy_losses.append(policy_loss.item())
+                value_losses.append(value_loss.item())
+                entropies.append(entropy.mean().item())
+                
+                # Track clip fraction and KL divergence
+                with torch.no_grad():
+                    clip_fraction = ((ratio - 1.0).abs() > self.config.PPO_CLIP_EPS).float().mean().item()
+                    clip_fractions.append(clip_fraction)
+                    
+                    # Use KL divergence from evaluate_actions (already computed)
+                    approx_kl = kl_div.item()
+                    
+                    # Ensure KL is finite
+                    if not torch.isfinite(kl_div):
+                        print(f"  Warning: Non-finite KL detected, skipping batch")
+                        continue
+                    
+                    kl_divs.append(approx_kl)
+                    epoch_kl += approx_kl
+                    num_batches += 1
+            
+            # Early stopping based on KL divergence
+            avg_kl = epoch_kl / max(num_batches, 1)
+            if avg_kl > self.config.MAX_KL:
+                print(f"  Early stopping at epoch {epoch + 1}/{self.config.NUM_EPOCHS} (KL={avg_kl:.4f} > {self.config.MAX_KL})")
+                break
+        
+        # Print update metrics
+        print(f"[Update {self.num_updates + 1}] Policy loss: {np.mean(policy_losses):.4f}")
+        print(f"              Value loss: {np.mean(value_losses):.4f}")
+        print(f"              Entropy: {np.mean(entropies):.4f}")
+        print(f"              Clip frac: {np.mean(clip_fractions):.4f}")
+        if kl_divs:
+            print(f"              Approx KL: {np.mean(kl_divs):.4f}")
     
     def _update_episode_stats(self, episode_info):
         """
@@ -262,9 +392,15 @@ class Trainer:
                 'SEED': self.config.SEED,
                 'LEARNING_RATE': self.config.LEARNING_RATE,
                 'GAMMA': self.config.GAMMA,
-            }
-            # In PR-3: add model weights
+            },
+            # PR-3: Add model and optimizer state
+            'model_state_dict': self.policy.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
         }
+        
+        # Add opponent policy if using frozen opponent
+        if self.config.USE_FROZEN_OPPONENT:
+            checkpoint['opponent_state_dict'] = self.opponent_policy.state_dict()
         
         torch.save(checkpoint, checkpoint_path)
         print(f"\n[Checkpoint] Saved to {checkpoint_path}")
@@ -276,7 +412,7 @@ class Trainer:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.config.DEVICE)
         
         self.total_steps = checkpoint['total_steps']
         self.num_updates = checkpoint['num_updates']
@@ -285,7 +421,13 @@ class Trainer:
         self.win_counts = checkpoint['win_counts']
         self.total_episodes = checkpoint['total_episodes']
         
-        # In PR-3: load model weights
+        # PR-3: Load model and optimizer state
+        if 'model_state_dict' in checkpoint:
+            self.policy.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if self.config.USE_FROZEN_OPPONENT and 'opponent_state_dict' in checkpoint:
+            self.opponent_policy.load_state_dict(checkpoint['opponent_state_dict'])
         
         print(f"[Checkpoint] Loaded from {checkpoint_path}")
         print(f"  Resuming from step {self.total_steps}")
@@ -294,7 +436,7 @@ class Trainer:
 def main():
     """Main entry point for training."""
     print("\n" + "="*60)
-    print("Tron Agent Training - PR-2")
+    print("Tron Agent Training - PR-3 (Neural Policy)")
     print("="*60)
     print(f"Config:")
     print(f"  Seed: {config.SEED}")
@@ -302,6 +444,7 @@ def main():
     print(f"  Rollout length: {config.ROLLOUT_LENGTH}")
     print(f"  Batch size: {config.BATCH_SIZE}")
     print(f"  Max steps: {config.MAX_TRAINING_STEPS}")
+    print(f"  Device: {config.DEVICE}")
     print("="*60 + "\n")
     
     # Initialize trainer
