@@ -214,6 +214,25 @@ class ActorCriticPolicy(nn.Module):
         
         return action_logits, values
     
+    def _compute_legal_actions_mask(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Compute legal action mask from observation.
+        
+        Note: This is a simplified heuristic. For full game-rule compliance,
+        the environment should provide the mask directly.
+        
+        Args:
+            obs: Observation dictionary with board state
+        
+        Returns:
+            Boolean mask (1=legal, 0=illegal) of shape (num_actions,)
+        """
+        # For now, return all actions as valid
+        # TODO: Implement proper legal move detection based on game rules
+        # This would require checking board boundaries and collision detection
+        # which should ideally come from the environment
+        return np.ones(self.num_actions, dtype=np.float32)
+    
     def act(self, obs: Dict[str, np.ndarray], action_mask: np.ndarray = None) -> Tuple[int, float, float]:
         """
         Select an action given observation with optional action masking.
@@ -221,6 +240,7 @@ class ActorCriticPolicy(nn.Module):
         Args:
             obs: Observation dictionary
             action_mask: Optional boolean mask (1=valid, 0=invalid) of shape (num_actions,)
+                        If None, will attempt to compute legal actions (simplified heuristic)
         
         Returns:
             Tuple of (action, logprob, value)
@@ -236,11 +256,14 @@ class ActorCriticPolicy(nn.Module):
             action_logits, values = self.forward(obs_tensor)
             action_logits = action_logits.squeeze(0)  # Remove batch dimension
             
-            # Apply action mask if provided
-            if action_mask is not None:
-                mask_tensor = torch.from_numpy(action_mask.astype(np.float32)).to(self.device)
-                # Set logits of invalid actions to very negative value
-                action_logits = torch.where(mask_tensor > 0, action_logits, torch.tensor(-1e8, device=self.device))
+            # Apply action mask
+            if action_mask is None:
+                # Compute legal actions heuristically if not provided
+                action_mask = self._compute_legal_actions_mask(obs)
+            
+            mask_tensor = torch.from_numpy(action_mask.astype(np.float32)).to(self.device)
+            # Set logits of invalid actions to very negative value
+            action_logits = torch.where(mask_tensor > 0, action_logits, torch.tensor(-1e8, dtype=torch.float32, device=self.device))
             
             # Sample action from categorical distribution
             action_probs = F.softmax(action_logits, dim=-1)
@@ -270,6 +293,7 @@ class ActorCriticPolicy(nn.Module):
             obs_tensors: Tensor of observations, shape (batch_size, feature_size)
             actions: Tensor of actions taken, shape (batch_size,)
             action_masks: Optional tensor of action masks, shape (batch_size, num_actions)
+                         If None, no masking is applied (assumes all actions were legal during rollout)
             old_values: Optional tensor of old value estimates for value clipping
             old_logprobs: Optional tensor of old log probabilities for KL computation
         
@@ -288,8 +312,11 @@ class ActorCriticPolicy(nn.Module):
         action_logits, values = self.forward(obs_tensors)
         
         # Apply action masks if provided
+        # Note: During PPO training, we don't recompute masks from observations
+        # The masks should be provided if action masking was used during rollout
         if action_masks is not None:
-            action_logits = torch.where(action_masks > 0, action_logits, torch.tensor(-1e8, device=self.device))
+            action_logits = torch.where(action_masks > 0, action_logits, 
+                                       torch.tensor(-1e8, dtype=torch.float32, device=self.device))
         
         # Compute action probabilities and distribution
         action_probs = F.softmax(action_logits, dim=-1)
@@ -310,7 +337,7 @@ class ActorCriticPolicy(nn.Module):
             kl = old_logprobs - logprobs
             kl_div = kl.mean()
         else:
-            kl_div = torch.tensor(0.0, device=self.device)
+            kl_div = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         
         return logprobs, values, entropy, kl_div
     

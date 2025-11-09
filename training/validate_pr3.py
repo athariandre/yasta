@@ -103,9 +103,15 @@ def test_forward_pass():
             'alive': np.array([1, 1], dtype=np.float32),
         }
         
-        # Test act()
+        # Test act() without mask (automatic masking)
         action, logprob, value = policy.act(obs)
-        print(f"✓ act() returns: action={action}, logprob={logprob:.4f}, value={value:.4f}")
+        print(f"✓ act() without mask: action={action}, logprob={logprob:.4f}, value={value:.4f}")
+        
+        # Test act() with explicit mask
+        mask = np.array([1, 1, 0, 0], dtype=np.float32)
+        action_masked, logprob_masked, value_masked = policy.act(obs, action_mask=mask)
+        print(f"✓ act() with mask: action={action_masked} (constrained to 0-1)")
+        assert action_masked in [0, 1], f"Action {action_masked} violates mask"
         
         # Validate outputs
         assert isinstance(action, int) and 0 <= action < 4, "Invalid action"
@@ -113,14 +119,23 @@ def test_forward_pass():
         assert isinstance(value, float), "Invalid value type"
         print("✓ act() output types are correct")
         
-        # Test evaluate_actions() with pre-encoded tensors
+        # Test evaluate_actions() with pre-encoded tensors and old_logprobs
         obs_tensors = torch.stack([policy._obs_to_tensor(obs) for _ in range(5)], dim=0)
         actions = torch.tensor([0, 1, 2, 3, 0], dtype=torch.long)
+        old_logprobs_test = torch.randn(5)
         
+        logprobs, values, entropy, kl_div = policy.evaluate_actions(
+            obs_tensors, actions, old_logprobs=old_logprobs_test
+        )
+        print(f"✓ evaluate_actions() with old_logprobs: KL={kl_div.item():.4f}")
+        assert kl_div.item() != 0.0, "KL should be non-zero with old_logprobs"
+        
+        # Test without old_logprobs
         logprobs, values, entropy, kl_div = policy.evaluate_actions(obs_tensors, actions)
-        print(f"✓ evaluate_actions() returns tensors of shape: {logprobs.shape}, {values.shape}, {entropy.shape}, kl_div={kl_div.item():.4f}")
+        print(f"✓ evaluate_actions() without old_logprobs: KL={kl_div.item():.4f}")
+        assert kl_div.item() == 0.0, "KL should be zero without old_logprobs"
         
-        # Validate outputs
+        # Validate output shapes
         assert logprobs.shape == (5,), "Invalid logprobs shape"
         assert values.shape == (5,), "Invalid values shape"
         assert entropy.shape == (5,), "Invalid entropy shape"
