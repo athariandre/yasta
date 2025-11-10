@@ -118,7 +118,7 @@ class Agent:
             cur_dx, cur_dy = self.direction.value
             req_dx, req_dy = direction.value
             if (req_dx, req_dy) == (-cur_dx, -cur_dy):
-                print('invalid move')
+                # print('invalid move')  # Commented out to reduce training spam
                 continue  # Skip this move if invalid direction
             
             head = self.trail[-1]
@@ -196,13 +196,13 @@ class Game:
         agent_two_alive = self.agent2.move(dir2, other_agent=self.agent1, use_boost=boost2)
 
         if not agent_one_alive and not agent_two_alive:
-            print("Both agents have crashed.")
+            # print("Both agents have crashed.")  # Commented out to reduce training spam
             return GameResult.DRAW
         elif not agent_one_alive:
-            print("Agent 1 has crashed.")
+            # print("Agent 1 has crashed.")  # Commented out to reduce training spam
             return GameResult.AGENT2_WIN
         elif not agent_two_alive:
-            print("Agent 2 has crashed.")
+            # print("Agent 2 has crashed.")  # Commented out to reduce training spam
             return GameResult.AGENT1_WIN
 
         self.turns += 1

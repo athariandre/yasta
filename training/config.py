@@ -21,12 +21,12 @@ class TrainingConfig:
     DEVICE = "cpu"  # device for training (CPU-only per competition rules)
     
     # PPO hyperparameters
-    LEARNING_RATE = 3e-4
+    LEARNING_RATE = 5e-4  # Increased from 3e-4 for faster learning
     GAMMA = 0.99  # discount factor
     GAE_LAMBDA = 0.95  # GAE lambda for advantage estimation
     PPO_CLIP_EPS = 0.2  # PPO clipping parameter
     VALUE_COEFF = 0.5  # value loss coefficient
-    ENTROPY_COEFF = 0.01  # entropy bonus coefficient
+    ENTROPY_COEFF = 0.02  # entropy bonus coefficient - increased to maintain exploration
     MAX_GRAD_NORM = 0.5  # gradient clipping
     MAX_KL = 0.03  # maximum KL divergence before early stopping
     VALUE_CLIP_RANGE = 0.2  # clipping range for value function (PPO2)
@@ -58,7 +58,7 @@ class TrainingConfig:
     
     # Self-play settings
     USE_FROZEN_OPPONENT = True  # freeze opponent policy for stable self-play
-    OPPONENT_UPDATE_INTERVAL = 5  # update opponent snapshot every N updates (not rollouts)
+    OPPONENT_UPDATE_INTERVAL = 2  # update opponent snapshot every N updates (not rollouts) - more frequent updates
     OPPONENT_TYPE = "self"  # "self" or "heuristic"
     PLAYER_SWAP_PROB = 0.5  # probability of playing as player 2
     
